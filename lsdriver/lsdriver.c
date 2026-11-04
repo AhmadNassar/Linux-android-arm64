@@ -55,20 +55,36 @@ struct task_struct *volatile ls_process_task = 0;
 static int CpuRenderTestThreadFunction(void *data)
 {
     unsigned long deadline = jiffies + 5 * HZ;
+    bool frame_open;
     int ret;
 
     (void)data;
     while (!kthread_should_stop() && time_before(jiffies, deadline))
     {
-        ret = cpu_render_clear(0xff101820U);
+        frame_open = false;
+        ret = cpu_render_begin_frame();
+        if (!ret) frame_open = true;
+        if (!ret) ret = cpu_render_clear(0xff101820U);
         if (!ret) ret = cpu_render_line(20, 80, 360, 360, 0xffff453aU, 6);
+        if (!ret) ret = cpu_render_rect(40, 120, 280, 300, 0xff30d5c8U, 4, false);
+        if (!ret) ret = cpu_render_rect(80, 160, 180, 240, 0xffffd60aU, 2, true);
+        if (!ret) ret = cpu_render_circle(320, 320, 120, 0xff64d2ffU, 6, false);
+        if (!ret) ret = cpu_render_circle(480, 420, 50, 0xffff375fU, 2, true);
+        if (!ret) ret = cpu_render_text(48, 520, "LSDRIVER", 4, 0xffffffffU);
+        if (frame_open)
+        {
+            int end_ret = cpu_render_end_frame();
+
+            frame_open = false;
+            if (!ret) ret = end_ret;
+        }
         if (ret)
         {
             ls_log_always_tag("cpu_render", "测试绘制失败，错误码: %d\n", ret);
             break;
         }
 
-        msleep(100);
+        usleep_range(8000, 8500);
     }
     return 0;
 }

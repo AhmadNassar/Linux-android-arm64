@@ -1,0 +1,5 @@
+simulation: ABI, dispatch snapshots, target file references, KGSL errors and 4096 IDs passed
+simulation IDR: NULL allocations, tree boundaries, retries, races and 2048 model comparisons passed
+environment: process identity, one pinned file/read, FD replacement, unchanged f_pos, ARM64 stat and error/reference paths passed
+simulation client: legacy concurrency, KGSL transport and old-module detection passed
+Android ARM64: real driver header + all simulation client methods compiled

@@ -1,0 +1,80 @@
+{
+  "version": "1.1.0",
+  "abi_version": 1,
+  "repository": "https://github.com/enenH/enkernel",
+  "commit": "1c3eb28b4cae3302714d96716aab55bcaf331fc6",
+  "upstream_sha256": {
+    "abi.h": "576a7c17a8d6ba4bd5b8453dabf2291be35c9283bc4eb08d465959db66d4dc03",
+    "mem.c": "80f0e8cc37cfbce42fe0711fbb485a3f58472ad9624dc7f602f3d6b64756e402",
+    "kgsl.c": "44e0e324f6c414a8ed53207fdcaff25bfd208ba273d4b4585bb21efb66995445",
+    "main.c": "9b288d5afea83944561dd085a48b56c273f5b06525ac7e53cc8a77bcef954c2e"
+  },
+  "scope": [
+    "PID and module queries",
+    "TLS and thread selection/enumeration",
+    "Bionic named thread stack",
+    "hardware PACGA",
+    "non-faulting mapping and access snapshots",
+    "thread signal state",
+    "target PID/FD KGSL validate, syncsource peek, GPUOBJ_INFO",
+    "target process start_boottime identity",
+    "one-reference target memfd read8 and AArch64 stat"
+  ],
+  "transport": "existing lsdriver shared request; original headers unchanged",
+  "target_kernel": "6.1.138",
+  "baseline_module": "docs/evidence/driver-swap-1.0.2/lsdriver-swap-6.1.138.ko",
+  "validation": {
+    "kernel_build": "Per-module build.json records the compiled kernel, source, imports and page size",
+    "device": "pending new module"
+  },
+  "baseline_module_sha256": "184badac9286f892ea265776d05ff727224d563853c8a86464b24cfff5207288",
+  "kernel_adaptation": {
+    "repository": "https://android.googlesource.com/kernel/common/",
+    "commit": "098619d7de5518919c2cb3dec6cc832967029b04",
+    "purpose": "local read-only xas_find_marked subset for GKI KMI; sprint_symbol spans instead of unexported kallsyms_lookup_size_offset",
+    "reference_sha256": {
+      "lib/xarray.c": "2178c37e8dc8c6fa48d8be2742012a5ff35b7e5ceb97a756ad9be8cd3187b6e7",
+      "include/linux/xarray.h": "6133113cc9fde16ed6c4366405e4248eafb17e2bd4b21f954a16f14d04ccc043",
+      "kernel/kallsyms.c": "e9126cbecfc154849b404b3d4942925c22575af8f3776b4dc4472c25239c40a5",
+      "include/linux/kallsyms.h": "908977a1f051b9c768214c166dd0fd523e03c69792724cb941ebe2d8af677db5",
+      "android/abi_gki_aarch64_qcom": "b8f4592e2e7fd894552514c2feebe7e29627713ae2ce8de8bd894483909b0ec2",
+      "arch/arm64/include/asm/pointer_auth.h": "9ea466c745fb4d05abd7d0ae54c7516b28cbdbb7b6ae505da8b25c7424745cbd"
+    }
+  },
+  "adaptations": [
+    "Selected upstream request structures and command encodings are retained byte-for-byte; only the transport envelope is new.",
+    "Typed handlers use a private kernel payload; the dispatch kthread never copy_from_user/copy_to_user against the client.",
+    "TLS/thread/stack/PACGA/mapping/access/signal methods retain upstream algorithms.",
+    "KGSL holds the target PID/FD file directly and uses the fixed native GPUOBJ_INFO signature with CFI enabled.",
+    "Excluded IDs travel in legacy vmem_info scratch, are copied once, and keep the full upstream 4096-item limit.",
+    "Read-only xas_find_marked and its local helpers come from pinned Linux source, avoiding a KMI-unexported dependency.",
+    "Exported sprint_symbol provides the same offset/size span instead of unexported kallsyms_lookup_size_offset.",
+    "Memory reads retain the existing Swap-aware lsdriver reader; no upstream NC reader or install hook is imported.",
+    "GKI-unexported kernel_read and vfs_getattr use exact typed runtime symbol lookup; builds verify both symbols in System.map.",
+    "KernelServices supplies all simulation environment queries for both custom read modes; Unicorn remains in userspace."
+  ],
+  "target_kernels": [
+    "6.1.138",
+    "6.12.23",
+    "6.12.58"
+  ],
+  "target_page_sizes": {
+    "6.1.138": [
+      "4k"
+    ],
+    "6.12.23": [
+      "4k"
+    ],
+    "6.12.58": [
+      "4k"
+    ]
+  },
+  "target_android16_kmi": {
+    "6.12.23": 5,
+    "6.12.58": 6
+  },
+  "read_modes": [
+    "cached",
+    "nc"
+  ]
+}

@@ -14,6 +14,7 @@
 
 #ifndef VIRTUAL_MEMORY_RW_H
 #define VIRTUAL_MEMORY_RW_H
+#include "sgame_read_mode.h"
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/percpu.h>
@@ -474,12 +475,11 @@ static inline int linear_write_physical(phys_addr_t paddr, const void *buffer, s
     return 0;
 }
 
+#include "sgame_swap_read.h"
+
 // 进程读写
 static int virtual_memory_rw(enum request_op op, pid_t pid, uint64_t vaddr, void *buffer, size_t size)
 {
-    static pid_t cached_pid = 0;
-    static struct mm_struct *cached_mm = NULL;
-
     uint64_t current_vaddr = untagged_addr(vaddr);
     size_t bytes_processed = 0;
     size_t bytes_done = 0;
@@ -488,28 +488,20 @@ static int virtual_memory_rw(enum request_op op, pid_t pid, uint64_t vaddr, void
     //主动资源清理释放缓存mm引用
     if (pid == 0)
     {
-        if (cached_mm) mmput(cached_mm);
-        cached_mm = NULL;
-        cached_pid = 0;
+        sgame_vmem_drop_mm();
         return 0;
     }
     //参数检查往后移
     if (!buffer || size == 0) return -EINVAL;
 
-    //缓存mm,提升函数整体一半以上的效率
-    if (!cached_mm || pid != cached_pid)
+    struct mm_struct *mm = sgame_vmem_get_mm(pid);
+    if (!mm) return -ESRCH;
+    if (op == request_op_vmem_read)
     {
-        struct mm_struct *new_mm = get_mm_by_pid(pid);
-        if (!new_mm) return -EINVAL;
-
-        //释放旧mm引用计数
-        if (cached_mm) mmput(cached_mm);
-        //缓存新mm
-        cached_mm = new_mm;
-        cached_pid = pid;
+        int result = sgame_swap_read(mm, (unsigned long)current_vaddr, buffer, size);
+        mmput(mm);
+        return result;
     }
-
-    struct mm_struct *mm = cached_mm;
 
     /* ---------- 逐页循环 ---------- */
     while (bytes_processed < size)
@@ -555,6 +547,7 @@ static int virtual_memory_rw(enum request_op op, pid_t pid, uint64_t vaddr, void
         current_vaddr += bytes_this_page;
     }
 
+    mmput(mm);
     return (bytes_done == 0) ? status : (int)bytes_done;
 }
 

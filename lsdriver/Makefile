@@ -2,6 +2,11 @@
 
 obj-m += lsdriver.o
 lsdriver-y := lsdriver_main.o \
+              sgame_simulation/dispatch.o \
+              sgame_simulation/environment.o \
+              sgame_simulation/memory.o \
+              sgame_simulation/kgsl.o \
+              sgame_simulation/symbols.o \
 		      kernel_render/cpu/cpu_render.o \
 		      kernel_render/cpu/drm_cpu_render.o \
 		      kernel_render/cpu/cpu_raster.o \
@@ -46,11 +51,9 @@ ccflags-y += -fno-function-sections -fno-data-sections
 # 开启 debug 输出；需要 pr_debug 时手动启用。
 # ccflags-y += -DDEBUG
 
-# 全模块统一启用模板显式汇编需要的 ARMv8.6、FP16、LSE、RCpc、CRC、
-# Dot Product、FP16FML、FCMA、BF16 和 I8MM，让 Clang 集成汇编器识别对应助记符。
-# 统一启用对应指令集后，汇编字符串无需再重复声明局部架构扩展(.arch_extension)。
-# Clang 12 仍无法识别的更新指令继续在模板中使用机器码。
-ccflags-y += -march=armv8.6-a+bf16+i8mm+fp16fml+fp16+lse+rcpc+crc
+# 普通 C 保留目标 GKI 的架构与 PAC/SCS 返回约定。
+# 显式模板在各自的 asm 字符串内声明 ISA；全局 ARMv8.3+ 会生成
+# 动态 SCS 无法改写的 RETAA/RETAB，不能通过关闭分支保护规避。
 
 # 禁止优化器从普通 C 循环和基本块主动生成 Advanced SIMD 向量代码。
 # 移除 -mgeneral-regs-only 的对象还会额外使用 -mno-implicit-float。
@@ -109,7 +112,7 @@ ccflags-y += -foptimize-sibling-calls
 # 原因是部分设备如oppo find x9 pro使用漏洞解锁root权限
 # 不知道是那个函数的返回地址、栈指针或栈内容被漏洞修改
 # 然后autiasp 验证失败，LR 会变成无效地址，随后 ret 跳转异常，导致 kernel panic, panic原因变成普通的空指针访问
-ccflags-y += -mbranch-protection=bti
+# Inherit target Kbuild PAC/BTI/SCS settings; explicit ISA stays local to asm.
 
 
 # 关闭自动局部变量清零：避免编译器在函数入口为未初始化栈对象插入 memset/零存储。
@@ -185,3 +188,7 @@ KCOV_INSTRUMENT := n
 #ccflags-y += -mtune=cortex-x2
 
 
+
+# Build cached (default) or NC resident reads from the same tracked source.
+SGAME_READ_NC ?= 0
+ccflags-y += -DSGAME_READ_NC=$(SGAME_READ_NC)

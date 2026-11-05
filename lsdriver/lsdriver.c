@@ -7,6 +7,7 @@
 #include <linux/atomic.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/kthread.h>
+#include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/mm.h>
@@ -35,10 +36,9 @@
 #include "virtual_memory_rw.h"
 #include "virtual_memory_enum.h"
 #include "break_point.h"
-#include "network/ipv4_ping.h"
 #include "kernel_render/cpu/cpu_render.h"
 
-static struct request_obj *req = NULL;
+static struct request_obj *sgame_connected_req;
 
 /*
 volatile 约束，这三个指针的每次读写都按易变访问处理，
@@ -51,6 +51,15 @@ struct task_struct *volatile ls_process_task = ...; // 正确：指针变量本�
 struct task_struct *volatile connect_thread_task = 0;
 struct task_struct *volatile dispatch_thread_task = 0;
 struct task_struct *volatile ls_process_task = 0;
+
+#include "sgame_session.h"
+static void sgame_request_shutdown(void);
+#include "sgame_simulation/internal.h"
+unsigned long sgame_sim_lookup_name(const char *name)
+{
+    return generic_kallsyms_lookup_name(name);
+}
+
 
 static int CpuRenderTestThreadFunction(void *data)
 {
@@ -91,33 +100,29 @@ static int CpuRenderTestThreadFunction(void *data)
 
 static int DispatchThreadFunction(void *data)
 {
-    // 自旋计数器：用来记录我们空转了多久
     int spin_count = 0;
-    while (dispatch_thread_task)
+
+    while (!kthread_should_stop() && !READ_ONCE(sgame_stop_requested))
     {
-        if (ls_process_task)
+        struct request_obj *req;
+        bool connected, worked = false;
+
+        mutex_lock(&sgame_session_mutex);
+        req = sgame_connected_req;
+        connected = req != NULL;
+        if (req && __atomic_load_n(&req->kernel, __ATOMIC_ACQUIRE))
         {
-            /*
-            不使用__atomic_exchange_n 是性能问题：
-            内核轮询到部分时没任务会反复执行swpa wzr, w8, [addr]交换，开销比只读大几倍
-            有持续任务的话使用__atomic_exchange_n快
-            现在的情况是5000次外的睡眠不管吧，请求低的下70%时间都轮询到睡眠了上了，睡眠没啥好说的
-            在5000次内可能1300次轮询后才有实际请求到，或者3400次才到
-            5000次全空是这情况，有持续任务还是__atomic_exchange_n快
-            设备	exchange：swpa	load：ldar
-            RMX3888	5.70–6.20 ns/轮	0.43–0.46 ns/轮
-            PCAM00	122.90–145.72 ns/轮	1.10 1.15 ns/轮
-            */
-            if (__atomic_load_n(&req->kernel, __ATOMIC_ACQUIRE)) // 确实有任务
-            {
-                // 有活干，重置计数器
-                spin_count = 0;
+            u32 op;
 
-                __atomic_store_n(&req->kernel, 0, __ATOMIC_RELAXED); // 清除请求标志
-
-                enum request_op op = __atomic_load_n(&req->op, __ATOMIC_RELAXED);
-
-                switch (op) // 派发
+            worked = true;
+            __atomic_store_n(&req->kernel, 0, __ATOMIC_RELAXED);
+            op = __atomic_load_n(&req->op, __ATOMIC_RELAXED);
+                if (op == SGAME_SIM_REQUEST_OP) {
+                    int status = sgame_sim_dispatch(req->vmemrw_info.user_buffer,
+                        sizeof(req->vmemrw_info.user_buffer),
+                        &req->vmem_info, sizeof(req->vmem_info));
+                    __atomic_store_n(&req->status, status, __ATOMIC_RELAXED);
+                } else switch (op) // 派发
                 {
                 case request_op_none:
                     break;
@@ -188,141 +193,34 @@ static int DispatchThreadFunction(void *data)
                     __atomic_store_n(&req->status, get_env_params(req->tgid, req->env_info.thread_name, &req->env_info.tpidr_el0, &req->env_info.pacga_lo, &req->env_info.pacga_hi, &req->env_info.tls_status, &req->env_info.pacga_status), __ATOMIC_RELAXED);
                     break;
                 case request_op_kernel_exit:
-                    hide_task_remove(connect_thread_task->pid);
-                    hide_task_remove(dispatch_thread_task->pid);
-                    connect_thread_task = NULL;  // 标记连接线程退出
-                    dispatch_thread_task = NULL; // 标记调度线程退出
+                    WRITE_ONCE(sgame_stop_requested, true);
+                    sgame_request_shutdown();
                     break;
                 default:
                     break;
                 }
-                __atomic_store_n(&req->user, 1, __ATOMIC_RELEASE); // 通知用户层完成
-            }
-            else
-            {
-                // 暂时没活干
-
-                // 策略：前 5000 次循环死等（极速响应），超过后才睡觉
-                if (spin_count < 5000)
-                {
-                    spin_count++;
-                    //cpu_relax(); // arm64下yield等同于nop
-                }
-                else
-                {
-                    // 既不占 CPU，也能快速醒来
-                    usleep_range(50, 100);
-
-                    // 这里不要重置 spin_count，
-                    // 保持睡眠状态直到下一个任务到来，做到了有任务超高性能响应，没任务超低消耗;
-                }
-            }
+            __atomic_store_n(&req->user, 1, __ATOMIC_RELEASE);
         }
-        else
-        {
-            // 还没连接到进程，深睡眠
-            msleep(2000);
-        }
+        mutex_unlock(&sgame_session_mutex);
+        if (worked) spin_count = 0;
+        else if (!connected) msleep_interruptible(20);
+        else if (spin_count < 5000) ++spin_count;
+        else usleep_range(50, 100);
     }
     return 0;
 }
 
 static int ConnectThreadFunction(void *data)
 {
-    struct task_struct *task;
-    struct task_struct *old_task;
-    struct mm_struct *mm = NULL;
-    struct page **pages = NULL;
-    int num_pages;
-    int ret;
+    while (!kthread_should_stop() && !READ_ONCE(sgame_stop_requested)) {
+        struct task_struct *task;
 
-    // 和内核线程在运行
-    while (connect_thread_task)
-    {
-
-        // 遍历系统中所有进程,//这里不加RCU锁，不然会导致6.6以上超时
-        for_each_process(task)
-        {
-            if (__builtin_strcmp(task->comm, "LS") != 0) continue;
-
-            // 这次的task是旧task跳过
-            if (task == ls_process_task) continue;
-            // 这次的task启动时间小于旧task跳过
-            old_task = ls_process_task;
-            if (old_task && task->start_time <= old_task->start_time) continue;
-
-            // 获取进程的内存描述符
-            mm = get_task_mm(task);
-            if (!mm) continue;
-
-            // 计算页数
-            num_pages = (sizeof(struct request_obj) + PAGE_SIZE - 1) / PAGE_SIZE;
-
-            // 分配页指针数组
-            pages = kmalloc_array(num_pages, sizeof(struct page *), GFP_KERNEL);
-            if (!pages)
-            {
-                ls_log_always_tag("core", "kmalloc_array 失败\n");
-                goto out_put_mm;
-            }
-
-            // 远程获取用户空间地址对应的物理页（将用户地址映射到内核）
-            mmap_read_lock(mm);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0) // 内核 6.18 及以上
-            ret = get_user_pages_remote(mm, 0x2025827000, num_pages, FOLL_WRITE, pages, NULL);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) // 内核 6.12 到 6.18
-            ret = get_user_pages_remote(mm, 0x2025827000, num_pages, FOLL_WRITE, pages, NULL);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)  // 内核 6.5 到 6.12
-            ret = get_user_pages_remote(mm, 0x2025827000, num_pages, FOLL_WRITE, pages, NULL);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)  // 内核 6.1 到 6.5
-            ret = get_user_pages_remote(mm, 0x2025827000, num_pages, FOLL_WRITE, pages, NULL, NULL);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) // 内核 5.15 到 6.1
-            ret = get_user_pages_remote(mm, 0x2025827000, num_pages, FOLL_WRITE, pages, NULL, NULL);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) // 内核 5.10 到 5.15
-            ret = get_user_pages_remote(mm, 0x2025827000, num_pages, FOLL_WRITE, pages, NULL, NULL);
-#endif
-            mmap_read_unlock(mm);
-
-            if (ret < num_pages)
-            {
-                ls_log_always_tag("core", "get_user_pages_remote 失败, ret=%d\n", ret);
-                goto out_put_pages;
-            }
-
-            // 映射到内核虚拟地址
-            req = vmap(pages, num_pages, VM_MAP, PAGE_KERNEL);
-            if (!req)
-            {
-                ls_log_always_tag("core", "vmap 失败\n");
-                goto out_put_pages;
-            }
-            old_task = ls_process_task;
-            if (old_task && !(READ_ONCE(old_task->flags) & PF_EXITING)) send_sig(SIGKILL, old_task, 0); // 杀死旧的task线程组
-
-            // 成功 get_user_pages_remote 持有页面引用，只需释放 mm
-            ls_process_task = task;                            // 保存用户进程指针
-            __atomic_store_n(&req->user, 1, __ATOMIC_RELEASE); // 通知用户层已连接
-            hide_task_install(task->tgid);                     // 隐藏进程
-            hide_kgsl_install(task->tgid);                     // 隐藏高通GPU节点
-            kfree(pages);
-            pages = NULL;
-            mmput(mm);
-            mm = NULL;
-            break; // 找到目标进程，退出遍历
-
-        out_put_pages:
-            if (ret > 0) release_pages(pages, ret);
-            kfree(pages);
-            pages = NULL;
-
-        out_put_mm:
-            mmput(mm);
-            mm = NULL;
-        }
-
-        msleep(2000);
+        sgame_reap_exited_targets();
+        task = sgame_find_client();
+        if (task) sgame_connect_client(task);
+        if (!READ_ONCE(sgame_exit_event)) msleep_interruptible(100);
     }
-
+    sgame_cleanup_client();
     return 0;
 }
 
@@ -567,42 +465,13 @@ taskstats_exit(group_dead=true)
 static int taskstats_exit_hook_work(struct pt_regs *regs)
 {
     struct task_struct *task = (struct task_struct *)(uintptr_t)regs->regs[0];
-    //taskstats_exit 的 group_dead 由内核在 signal->live 递减后计算，非零表示当前是线程组最后一个退出线程。也是进程级退出了
-    bool group_dead = regs->regs[1] != 0;
-    char process_comm[TASK_COMM_LEN];
 
-    if (!group_dead) return 0;
-
-    get_task_comm(process_comm, task->group_leader);
-
-    // 任意被监控目标退出时移除其 TGID，防止 PID 槽位和 do_el0_svc hook 残留。
-    syscall_monitor_remove(task->tgid);
-    cntvct_monitor_remove(task->tgid);
-
-    // 仅匹配用户态通过 PR_SET_NAME 设置的精确进程名。
-    if (__builtin_strcmp(process_comm, "LS") == 0)
-    {
-        // 相应处理
-
-        hide_task_remove(task->tgid); // 只取消当前用户进程的隐藏，不影响隐藏的内核线程
-        hide_kgsl_remove(task->tgid); // 取消当前用户进程的高通GPU节点隐藏
-
-        v_touch_destroy();                // 清理触摸
-        v_gnss_destroy();                 // 清理定位
-        v_gyro_destroy();                 // 清理陀螺仪
-        remove_process_hwbp();            // 清理硬件断点
-        remove_process_ptebp();           // 清理 PTEBP
-        remove_process_dptdbg();          // 清理 DPTDBG
-        remove_process_stepbp();          // 清理单步断点
-        syscall_monitor_remove_all();     // 清理全部系统调用监控目标
-        cntvct_monitor_remove_all();      // 清理全部 CNTVCT_EL0 读取监控
-        virtual_memory_rw(0, 0, 0, 0, 0); // 清理缓存 mm 引用
-        ls_process_task = NULL;           // 标记用户进程已断开
-        if (!connect_thread_task && !dispatch_thread_task)
-        {
-            cpu_render_exit();
-            inline_hook_remove_all(); // 内核退出才清理所有hook
-        }
+    /* taskstats_exit can run under tasklist_lock. The original exit event is
+     * retained, but sleeping cleanup and hook removal belong to the connection
+     * thread, which also serializes with an in-flight Swap request. */
+    if (regs->regs[1] && task) {
+        WRITE_ONCE(sgame_exit_event, true);
+        if (READ_ONCE(connect_thread_task)) wake_up_process(connect_thread_task);
     }
     return 0;
 }
@@ -725,147 +594,25 @@ static void hide_myself(void)
     // }
 }
 
+#include "sgame_lifecycle.h"
+
 static int __init lsdriver_init(void)
 {
-    int status = 0;
-
-    //*(volatile int *)0 = 0;
-
-    // print_el2_status(); // 输出Hypervisor相关信息
-
-    bypass_cfi(); // 5系尝试绕过 CFI，失败时继续初始化，6系下默认失败也继续初始化
-
-    // PTE 读写需要，线性地址读写不需要；为每个 possible CPU 创建独立虚拟槽位
-    status = allocate_physical_page_info();
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "初始化物理页信息失败，错误码: %d\n", status);
-        goto fail;
-    }
-
-    struct ipv4_ping_diagnostic ping_diagnostic;
-    status = ipv4_ping_detailed("8.211.158.255", IPV4_PING_DEFAULT_TIMEOUT_MS, &ping_diagnostic);
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "初始化 ping 8.211.158.255 失败，错误码: %d，失败阶段: %s(%d)，回复校验: %s(%d)\n", status, ipv4_ping_failure_name(ping_diagnostic.failure), ping_diagnostic.failure, ipv4_ping_reply_mismatch_name(ping_diagnostic.reply_mismatch), ping_diagnostic.reply_mismatch);
-        goto fail;
-    }
-
-    //暂时不用，用户态可以处理
-    status = proc_create_block_init();
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "初始化 proc 屏蔽 hook 失败，错误码: %d\n", status);
-        goto fail;
-    }
-
-    connect_thread_task = kthread_create(ConnectThreadFunction, NULL, "ext4-rsv-conver");
-    if (IS_ERR(connect_thread_task))
-    {
-        status = PTR_ERR(connect_thread_task);
-        connect_thread_task = NULL;
-        ls_log_always_tag("core", "创建连接线程失败，错误码: %d\n", status);
-        goto fail;
-    }
-    dispatch_thread_task = kthread_create(DispatchThreadFunction, NULL, "ext4-rsv-conver");
-    if (IS_ERR(dispatch_thread_task))
-    {
-        status = PTR_ERR(dispatch_thread_task);
-        dispatch_thread_task = NULL;
-        ls_log_always_tag("core", "创建调度线程失败，错误码: %d\n", status);
-        goto fail;
-    }
-
-    sched_set_fifo_low(connect_thread_task); //低实时优先级,FIFO 1
-    sched_set_fifo(dispatch_thread_task);    //高实时优先级,FIFO 50
-    status = wake_up_process(connect_thread_task);
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "唤醒连接线程失败，错误码: %d\n", status);
-        goto fail;
-    }
-    status = wake_up_process(dispatch_thread_task);
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "唤醒调度线程失败，错误码: %d\n", status);
-        goto fail;
-    }
-    // 隐藏内核线程
-    status = hide_task_install(connect_thread_task->pid);
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "隐藏连接线程失败，错误码: %d\n", status);
-        goto fail;
-    }
-    status = hide_task_install(dispatch_thread_task->pid);
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "隐藏调度线程失败，错误码: %d\n", status);
-        goto fail;
-    }
-
-    // 注册用户进程退出回调
-    status = do_exit_init();
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "注册 taskstats_exit 清理 hook 失败，错误码: %d\n", status);
-        goto fail;
-    }
-    //初始化cpu渲染相关资源
-    status = cpu_render_init();
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "初始化 Qualcomm/MediaTek CPU 渲染统一抽象失败，错误码: %d\n", status);
-        status = 0; //失败无关紧要，继续运行
-    }
-    else
-    {
-        struct task_struct *render_task = kthread_run(CpuRenderTestThreadFunction, NULL, "ls-cpu-render");
-        if (IS_ERR(render_task))
-        {
-            status = PTR_ERR(render_task);
-            ls_log_always_tag("core", "创建 CPU 渲染测试线程失败，错误码: %d\n", status);
-            status = 0;
-        }
-    }
-
-    /*
-    隐藏内核模块本身必须放在所有初始化完成后运行。
-
-    正常是不可能初始化失败，只能是人才重复刷驱动了(或刷了同类驱动或冲突hook)，
-    上面任意初始化失败后内核会进入 free_module() 清理模块创建的资源。进行sysfs 回滚
-    taskstats_exit hook 返回 -95只是触发模块初始化失败和回滚
-    hide_myself() 提前 kobject_del()破坏了 sysfs 生命周期
-    mod_sysfs_teardown()在失效的 kobject 上继续清理
-    kernfs_remove_by_name_ns()输出了空指针警告
-    部分厂商内核的 kernfs 代码可能与上游不同，后续清理路径存在未防护的失效对象访问。panic
-    
-    */
-    hide_myself();
-
-    return status;
-
-fail:
-    if (connect_thread_task) hide_task_remove(connect_thread_task->pid);
-    if (dispatch_thread_task) hide_task_remove(dispatch_thread_task->pid);
-    connect_thread_task = NULL;
-    dispatch_thread_task = NULL;
-    cpu_render_exit();
-    inline_hook_remove_all(); //这个作用也不大,模块初始化失败内核会直接回收ko所有内存(.text回收)，这里就算hook卸载了，但是控制流在中途的hook work代码段被回收了要panic
-    free_physical_page_info();
-    return status;
+    return sgame_core_init(ConnectThreadFunction, DispatchThreadFunction);
 }
 static void __exit lsdriver_exit(void)
 {
-    //模块已隐藏，此函数不会被调用
+    sgame_core_exit();
 }
-
 module_init(lsdriver_init);
 module_exit(lsdriver_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Liao");
 MODULE_VERSION(LSDRIVER_VERSION);
+MODULE_INFO(sgame_simulation, SGAME_SIM_VERSION);
+MODULE_INFO(sgame_read_mode, SGAME_READ_MODE_NAME);
+MODULE_INFO(sgame_simulation_source, "enkernel-1c3eb28b4cae3302714d96716aab55bcaf331fc6");
 
 /*
 闲聊

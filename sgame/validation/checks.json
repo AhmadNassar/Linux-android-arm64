@@ -1,0 +1,11 @@
+{
+  "host_swap_matrix": "passed: cached/NC, 6.1/4K, 6.12/4K and 6.12/16K fixtures",
+  "client_visibility": "both calls execute before handshake; original best-effort failure is recorded and cleaned up",
+  "lifecycle": "passed: 8 required failure stages, optional CPU/demo failures and queued shutdown cleanup",
+  "environment_and_transport": "passed with ASan/UBSan",
+  "android_abi": "unchanged actual upstream driver header + every simulation Client method compiled for Android arm64",
+  "source_policy": "passed",
+  "kernel_build": "pending server access",
+  "device_hooks": "not installed or tested by this migration",
+  "embedded_application_modules": "unchanged"
+}

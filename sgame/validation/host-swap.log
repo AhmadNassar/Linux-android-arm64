@@ -1,0 +1,54 @@
+driver_swap_test: 105 reader cases + 2 initialization failures passed (4 release paths and customer symbols, nr_pages=1, balanced references)
+driver_swap_test: 105 reader cases + 2 initialization failures passed (4 release paths and customer symbols, nr_pages=1, balanced references)
+PASS: zero/partial GUP failure releases all page/task/mm references
+PASS: vmap failure releases all pinned pages
+PASS: shutdown during connection rejects publication and releases mapping
+PASS: owner exits during pinning, no stale request published
+PASS: both client hooks execute before handshake publication
+PASS: live worker group retains client even after leader exit
+PASS: reconnect waits for sleeping reader and then releases old mapping
+PASS: last worker exit releases request mapping, pages and client task
+PASS: RCU discovery excludes old, dead and differently named clients
+PASS: dead monitor targets removed in sleeping thread context
+PASS: upstream best-effort GPU hook failure is observable and cleaned up
+PASS: 6.12 PTE table replacement/removal and large-folio tail reads from cache/backend
+driver_swap_test: 105 reader cases + 2 initialization failures passed (4 release paths and customer symbols, nr_pages=1, balanced references)
+PASS: 6.12 PTE table replacement/removal and large-folio tail reads from cache/backend
+driver_swap_test: 105 reader cases + 2 initialization failures passed (4 release paths and customer symbols, nr_pages=1, balanced references)
+PASS: zero/partial GUP failure releases all page/task/mm references
+PASS: vmap failure releases all pinned pages
+PASS: shutdown during connection rejects publication and releases mapping
+PASS: owner exits during pinning, no stale request published
+PASS: both client hooks execute before handshake publication
+PASS: live worker group retains client even after leader exit
+PASS: reconnect waits for sleeping reader and then releases old mapping
+PASS: last worker exit releases request mapping, pages and client task
+PASS: RCU discovery excludes old, dead and differently named clients
+PASS: dead monitor targets removed in sleeping thread context
+PASS: upstream best-effort GPU hook failure is observable and cleaned up
+PASS: 6.12 PTE table replacement/removal and large-folio tail reads from cache/backend
+driver_swap_test: 105 reader cases + 2 initialization failures passed (4 release paths and customer symbols, nr_pages=1, balanced references)
+PASS: 6.12 PTE table replacement/removal and large-folio tail reads from cache/backend
+driver_swap_test: 105 reader cases + 2 initialization failures passed (4 release paths and customer symbols, nr_pages=1, balanced references)
+PASS: zero/partial GUP failure releases all page/task/mm references
+PASS: vmap failure releases all pinned pages
+PASS: shutdown during connection rejects publication and releases mapping
+PASS: owner exits during pinning, no stale request published
+PASS: both client hooks execute before handshake publication
+PASS: live worker group retains client even after leader exit
+PASS: reconnect waits for sleeping reader and then releases old mapping
+PASS: last worker exit releases request mapping, pages and client task
+PASS: RCU discovery excludes old, dead and differently named clients
+PASS: dead monitor targets removed in sleeping thread context
+PASS: upstream best-effort GPU hook failure is observable and cleaned up
+PASS: success; hooks retained or exact failure rolled back; no task/page leak
+PASS: swap-api; hooks retained or exact failure rolled back; no task/page leak
+PASS: physical-pages; hooks retained or exact failure rolled back; no task/page leak
+PASS: proc-block; hooks retained or exact failure rolled back; no task/page leak
+PASS: connect-thread; hooks retained or exact failure rolled back; no task/page leak
+PASS: dispatch-thread; hooks retained or exact failure rolled back; no task/page leak
+PASS: hide-connect-thread; hooks retained or exact failure rolled back; no task/page leak
+PASS: hide-dispatch-thread; hooks retained or exact failure rolled back; no task/page leak
+PASS: exit-hooks; hooks retained or exact failure rolled back; no task/page leak
+PASS: cpu-optional; hooks retained or exact failure rolled back; no task/page leak
+PASS: demo-optional; hooks retained or exact failure rolled back; no task/page leak

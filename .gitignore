@@ -44,6 +44,8 @@ windows/__pycache__/
 *.iml
 local.properties
 build/
+!sgame/build/
+!sgame/build/**
 out/
 captures/
 .cxx/

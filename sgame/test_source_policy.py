@@ -31,4 +31,9 @@ assert 'kernel_render/cpu/cpu_render.o' in code('lsdriver/Makefile')
 assert 'SGAME_READ_NC ?= 0' in code('lsdriver/Makefile')
 assert 'SGAME_UNAVAILABLE_PTEDBG_H' not in code('lsdriver/arm64_ptedbg.h')
 assert 'git apply' not in (ROOT/'sgame/export_source.py').read_text()
+for name in ('build-read-matrix.sh', 'build-6.1.138.sh', 'build-6.12.sh',
+             'build-6.12.23.sh', 'build-6.12.58.sh', 'prepare_host_tools.py',
+             'verify_gki_module.py', 'verify_pac_scs.py', 'kernel-baselines.json',
+             '6.12.23-manifest.xml', '6.12.58-manifest.xml'):
+    assert (ROOT/'sgame/build'/name).is_file(), name
 print('PASS: author interfaces/native PTE implementation and all feature flows retained; network probe disabled; committed-source builds')

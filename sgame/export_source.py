@@ -22,8 +22,15 @@ def export(output, read_mode='cached', revision='HEAD'):
             return False
         if name.startswith(('lsdriver/byte_stream/', 'lsdriver/arm64_tests/')):
             return False
-        return Path(name).suffix in ('.c', '.h', '.hpp', '.S', '.sh', '.py', '.json', '.md', '.xml', '.txt') or Path(name).name in ('Makefile', 'Kbuild')
+        return Path(name).suffix in ('.c', '.cpp', '.h', '.hpp', '.S', '.sh', '.py', '.json', '.md', '.xml', '.txt') or Path(name).name in ('Makefile', 'Kbuild')
     paths = [name for name in names if wanted(name)]
+    required = ('sgame/build/build-read-matrix.sh', 'sgame/build/build-6.1.138.sh',
+                'sgame/build/build-6.12.sh', 'sgame/build/kernel-baselines.json',
+                'sgame/tests/driver_simulation_client_test.cpp',
+                'sgame/tests/driver_simulation_abi_compile.cpp')
+    missing = [name for name in required if name not in paths]
+    if missing:
+        raise SystemExit('Committed driver source lacks required build inputs: ' + ', '.join(missing))
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     payload = git('archive', '--format=tar', commit, '--', *paths)

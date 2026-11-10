@@ -9,8 +9,15 @@
  * .cpu profile includes those extensions; it does not change C codegen or
  * require this CPU model at runtime. Each template still emits its own opcode.
  */
+#if defined(__clang__) && __clang_major__ < 14
+/* Clang 12 predates the A510 name. V1 exposes the same FP16FML/BF16/I8MM
+ * instructions needed by these templates without changing ordinary C ISA. */
+#define ARM64_HW_ASM_PROFILE ".cpu neoverse-v1+crc\n"
+#else
+#define ARM64_HW_ASM_PROFILE ".cpu cortex-a510+crc\n"
+#endif
 #define ARM64_HW_ASM(code) \
-    ".cpu cortex-a510+crc\n" \
+    ARM64_HW_ASM_PROFILE \
     code "\n.arch armv8-a\n"
 
 /*

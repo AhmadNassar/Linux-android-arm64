@@ -1,0 +1,42 @@
+{
+  "a12": {
+    "android": 12,
+    "branch": "android12-5.10",
+    "common_tag": "android12-5.10-2025-06_r1",
+    "common_commit": "484c3d56a37435198fa13276c8c97acda5ac28f4",
+    "kmi_generation": 9,
+    "clang": "r416183b",
+    "clang_commit": "6e3223f76384455acde43affde3df0ea9df66c0d",
+    "reference_sha256": {
+      "Makefile": "0d27d2f0a69be202778c44aa1fe8a3ae6ee5d3bc364697858d103d44ed75f6f7",
+      "include/linux/swap.h": "7c2472ebacb1dac1676f70b6dceae11543ca4efbdf69b9b0f79838fa59f6aa5c",
+      "include/linux/pagemap.h": "c2ae7ef4baf6bffc26901b1bc9d8b8dbcef15cc2fdc64e2c0793a3920dc46ad4",
+      "mm/swap_state.c": "654b21eb50f12e804f325142df648a2e2e25714946e474e51ed35c07b3fb2bd4",
+      "mm/swapfile.c": "1d3b5d89895f168fbf3fe1e19b1e5b6218107ff56cdbf941bc780158ea2e82f1",
+      "arch/arm64/include/asm/pgtable.h": "ddd22927b3636c59d2eb099d34dc23e94e6b208a9fc5de513e5803948fb07907",
+      "build.config.common": "85db703394f1bfd6d0f6211fe3f34ce0e7ce63286c127448ab3a409e994d10a2"
+    },
+    "version": "5.10.237",
+    "source": "https://android.googlesource.com/kernel/common/"
+  },
+  "a13": {
+    "android": 13,
+    "branch": "android13-5.10",
+    "common_tag": "android13-5.10.237_r00",
+    "common_commit": "7e2543346ff7ecc2e4fff0c95767c72c5ac165c6",
+    "kmi_generation": 4,
+    "clang": "r450784e",
+    "clang_commit": "9f759dee5cdc5f85d076c642a192f6a9232f7058",
+    "reference_sha256": {
+      "Makefile": "0494fe92f97881d722e9d6f0efb747547ab16efacbe3f97b88102c352f2aaedb",
+      "include/linux/swap.h": "67805005ec5d65d720ba02128ee47675ef991c914c9327b12af2c821f3e37fb1",
+      "include/linux/pagemap.h": "c2ae7ef4baf6bffc26901b1bc9d8b8dbcef15cc2fdc64e2c0793a3920dc46ad4",
+      "mm/swap_state.c": "b48936607ff3ff3b9a922e8b7cd3b347c6a13a39e501142c9d96b126c432b76b",
+      "mm/swapfile.c": "cb65455f6ba320d7dfabb98aba4db6a5c5e009971676b6710bc8d8cafac150df",
+      "arch/arm64/include/asm/pgtable.h": "b9a934de47d278d876d913c6a24c856ac3df2125e4b90a42da2cf488a9fb59ae",
+      "build.config.common": "750daffc7419f7d839b4d36ab0c3601a43d5c1ba6f8b721f1aa8a818482561dd"
+    },
+    "version": "5.10.237",
+    "source": "https://android.googlesource.com/kernel/common/"
+  }
+}

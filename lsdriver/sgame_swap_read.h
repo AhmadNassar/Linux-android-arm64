@@ -17,12 +17,21 @@
 #include <linux/version.h>
 #include <generated/utsrelease.h>
 
-#if !((LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)) || \
+#if !((LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)) || \
+      (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)) || \
       (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)))
-#error "sgame swap supports the reviewed Android 6.1 and 6.12 APIs"
+#error "sgame swap supports the reviewed Android 5.10, 6.1 and 6.12 APIs"
 #endif
 #ifndef CONFIG_SWAP
 #error "sgame swap requires CONFIG_SWAP"
+#endif
+#endif
+
+#ifndef SGAME_SWAP_LEGACY
+#if !defined(SGAME_SWAP_TEST) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+#define SGAME_SWAP_LEGACY 1
+#else
+#define SGAME_SWAP_LEGACY 0
 #endif
 #endif
 
@@ -38,7 +47,7 @@
 #endif
 #endif
 
-#define SGAME_SWAP_VERSION "1.1.0"
+#define SGAME_SWAP_VERSION "1.2.0"
 #define SGAME_SWAP_ATTEMPTS 3
 MODULE_INFO(sgame_swap, SGAME_SWAP_VERSION);
 
@@ -49,6 +58,11 @@ static struct {
     void (*free_nr)(swp_entry_t entry, int nr_pages);
     void (*free_and_cache_nr)(swp_entry_t entry, int nr_pages);
     int (*free_and_cache)(swp_entry_t entry);
+#if SGAME_SWAP_LEGACY
+    struct page *(*cache_get)(swp_entry_t entry, struct vm_area_struct *vma, unsigned long addr);
+    struct page *(*read_async)(swp_entry_t entry, gfp_t mask, struct vm_area_struct *vma,
+                               unsigned long addr, bool do_poll);
+#else
     struct folio *(*cache_get)(swp_entry_t entry, struct vm_area_struct *vma, unsigned long addr);
 #if SGAME_SWAP_MODERN
     struct folio *(*read_async)(swp_entry_t entry, gfp_t mask, struct vm_area_struct *vma,
@@ -56,6 +70,7 @@ static struct {
     struct page *(*read_async)(swp_entry_t entry, gfp_t mask, struct vm_area_struct *vma,
 #endif
                                unsigned long addr, struct swap_iocb **plug);
+#endif
 } sgame_swap_api;
 
 static int sgame_swap_init(void)
@@ -71,7 +86,11 @@ static int sgame_swap_init(void)
 } while (0)
     SGAME_SWAP_SYMBOL(get_device, "get_swap_device");
     SGAME_SWAP_SYMBOL(duplicate, "swap_duplicate");
+#if SGAME_SWAP_LEGACY
+    SGAME_SWAP_SYMBOL(cache_get, "lookup_swap_cache");
+#else
     SGAME_SWAP_SYMBOL(cache_get, "swap_cache_get_folio");
+#endif
     SGAME_SWAP_SYMBOL(read_async, "read_swap_cache_async");
 #undef SGAME_SWAP_SYMBOL
     /* Some vendor 6.1 kernels backport the batched APIs: swap_free() and
@@ -237,7 +256,9 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
                                  unsigned long addr, void *buffer, size_t size)
 {
     struct swap_info_struct *si;
+#if !SGAME_SWAP_LEGACY
     struct folio *folio;
+#endif
     struct page *page;
     spinlock_t *ptl;
     pmd_t *pmd, pmdval;
@@ -296,6 +317,15 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
      * swap_duplicate may allocate only with GFP_ATOMIC on count overflow. */
     si = sgame_swap_api.get_device(entry);
     status = si ? sgame_swap_api.duplicate(entry) : -EAGAIN;
+#if SGAME_SWAP_LEGACY
+    /* 5.10 get_swap_device() holds RCU, not a sleepable percpu reference.
+     * The duplicated slot keeps inuse_pages nonzero and prevents swapoff's
+     * try_to_unuse() from finishing. Drop RCU before any blocking work. */
+    if (si) {
+        put_swap_device(si);
+        si = NULL;
+    }
+#endif
     sgame_swap_pte_unlock(ptep, ptl);
     if (status) {
         if (si) put_swap_device(si);
@@ -304,6 +334,15 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
 
     ++sgame_swap_stats.swapped;
     started = ktime_get_ns();
+#if SGAME_SWAP_LEGACY
+    page = sgame_swap_api.cache_get(entry, vma, addr);
+    if (page) {
+        ++sgame_swap_stats.hits;
+    } else {
+        ++sgame_swap_stats.backend;
+        page = sgame_swap_api.read_async(entry, GFP_HIGHUSER_MOVABLE, vma, addr, false);
+    }
+#else
     folio = sgame_swap_api.cache_get(entry, vma, addr);
     if (folio) {
         ++sgame_swap_stats.hits;
@@ -320,15 +359,24 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
         folio = page ? page_folio(page) : NULL;
 #endif
     }
+#endif
     status = -ENOMEM;
     if (!page) goto out_entry;
 
     /* read_async can return a locked, not-yet-uptodate page. No PTL is held
      * while waiting. The folio lock also stabilizes swapcache ownership. */
+#if SGAME_SWAP_LEGACY
+    status = lock_page_killable(page);
+#else
     status = folio_lock_killable(folio);
+#endif
     if (status) goto out_page;
     status = -EAGAIN;
+#if SGAME_SWAP_LEGACY
+    if (!PageSwapCache(page)) goto out_folio;
+#else
     if (!folio_test_swapcache(folio)) goto out_folio;
+#endif
 #if SGAME_SWAP_MODERN
     /* 6.12 stores one base entry in the head folio, including large folios;
      * tail page->private no longer contains its individual swap entry. */
@@ -340,7 +388,11 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
         status = -EHWPOISON;
         goto out_folio;
     }
+#if SGAME_SWAP_LEGACY
+    if (!PageUptodate(page) || PageError(page)) {
+#else
     if (!folio_test_uptodate(folio) || folio_test_error(folio)) {
+#endif
         status = -EIO;
         goto out_folio;
     }
@@ -351,19 +403,31 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
     ptep = sgame_swap_pte_lock(mm, pmd, addr, &ptl);
     if (!ptep) goto out_folio;
     if (pte_same(READ_ONCE(*ptep), orig)) {
+#if SGAME_SWAP_LEGACY
+        mapped = kmap(page);
+#else
         mapped = kmap_local_page(page);
+#endif
         memory_copy(buffer, (u8 *)mapped + offset_in_page(addr), size);
+#if SGAME_SWAP_LEGACY
+        kunmap(page);
+#else
         kunmap_local(mapped);
+#endif
         status = 0;
     }
     sgame_swap_pte_unlock(ptep, ptl);
 out_folio:
+#if SGAME_SWAP_LEGACY
+    unlock_page(page);
+#else
     folio_unlock(folio);
+#endif
 out_page:
     put_page(page);
 out_entry:
     sgame_swap_release_entry(entry);
-    put_swap_device(si);
+    if (si) put_swap_device(si);
     started = ktime_get_ns() - started;
     sgame_swap_stats.io_ns += started;
     if (started > sgame_swap_stats.max_io_ns) sgame_swap_stats.max_io_ns = started;

@@ -35,7 +35,8 @@ assert '#include "arm64_ptedbg.h"' in breakpoints
 assert '#include "arm64_ptedbg-' not in breakpoints
 assert 'READ_ONCE(g_ptebp_info)' in breakpoints
 assert 'git apply' not in (ROOT/'sgame/export_source.py').read_text()
-for name in ('build-read-matrix.sh', 'build-6.1.138.sh', 'build-6.12.sh',
+for name in ('build-read-matrix.sh', 'build-5.10.sh', 'build_5_10.py', '5.10-baselines.json',
+             'build-6.1.138.sh', 'build-6.12.sh',
              'build-6.12.23.sh', 'build-6.12.58.sh', 'prepare_host_tools.py',
              'verify_gki_module.py', 'verify_pac_scs.py', 'kernel-baselines.json',
              '6.12.23-manifest.xml', '6.12.58-manifest.xml'):

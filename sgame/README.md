@@ -28,7 +28,10 @@ Develop the complete source directly. There is no patch-application step in the 
 - The real PTE breakpoint header now provided by upstream is used. The old unavailable stub
   is not imported. Public author headers are preserved at the selected upstream revision.
 - SG6 environment extension 1.1.0 remains in `lsdriver/sgame_simulation/`; emulation remains
-  in userspace. The Swap/core version is 1.1.0 (`author-features-group-poll`).
+  in userspace. The Swap/core version is 1.2.0 (`author-features-group-poll`).
+- Android 12/13 5.10 use the page-based Swap API, including its boolean `do_poll`
+  argument. Their RCU device guard ends after the slot reference is acquired and
+  before cache/backend waits. Existing folio paths for 6.1/6.12 are retained.
 - Ordinary C inherits target Kbuild PAC/BTI/SCS settings; hardware template ISA declarations
   remain local to the assembly blocks, retaining the project's PAC/SCS fix.
 
@@ -66,6 +69,24 @@ Builds record the Git commit, exact exported file hashes, kernel/KMI/page size, 
 imports and output SHA-256. Native 4K is the application's delivery configuration; the author's
 fixed user mapping address still requires separate userspace work for native 16K devices.
 The three kernel environments are pinned independently of upstream driver updates.
+
+### Android 5.10
+
+`build/5.10-baselines.json` pins Android 12 KMI 9 and Android 13 KMI 4,
+both 5.10.237/4K, with their matching Clang 12/14 revisions and API hashes.
+Prepare the pinned kernel and Clang trees, then build each mode from a separate export:
+
+```bash
+bash sgame/build/build-5.10.sh /path/to/work-a12 /path/to/source-cached a12 \
+  --kernel /path/to/a12/common --clang /path/to/clang-r416183b --host-tools /path/to/prebuilts/build-tools
+bash sgame/build/build-5.10.sh /path/to/work-a13 /path/to/source-cached a13 \
+  --kernel /path/to/a13/common --clang /path/to/clang-r450784e --host-tools /path/to/prebuilts/build-tools
+```
+
+Repeat with the NC export and the same kernel workspaces to reuse the GKI build.
+The script retains GKI CFI/LTO, builds the kernel symbol tables, checks actual
+imports and required dynamic lookups, and records source/ELF hashes and metadata.
+The host reader fixture includes both 5.10 modes and rejects RCU held across I/O.
 
 No rebuilt `.ko` is included in this source migration. Existing application/phone modules remain
 historical artifacts until the server builds and device verification complete. Hidden modules

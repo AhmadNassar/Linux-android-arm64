@@ -24,7 +24,9 @@ def export(output, read_mode='cached', revision='HEAD'):
             return False
         return Path(name).suffix in ('.c', '.cpp', '.h', '.hpp', '.S', '.sh', '.py', '.json', '.md', '.xml', '.txt') or Path(name).name in ('Makefile', 'Kbuild')
     paths = [name for name in names if wanted(name)]
-    required = ('sgame/build/build-read-matrix.sh', 'sgame/build/build-6.1.138.sh',
+    required = ('sgame/build/build-read-matrix.sh', 'sgame/build/build-5.10.sh',
+                'sgame/build/build_5_10.py', 'sgame/build/5.10-baselines.json',
+                'sgame/build/build-6.1.138.sh',
                 'sgame/build/build-6.12.sh', 'sgame/build/kernel-baselines.json',
                 'sgame/tests/driver_simulation_client_test.cpp',
                 'sgame/tests/driver_simulation_abi_compile.cpp')

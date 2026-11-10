@@ -7,7 +7,30 @@
 #include <linux/sched/signal.h>
 #include <linux/stat.h>
 #include <linux/user_namespace.h>
+#ifdef __KERNEL__
+#include <linux/cred.h>
+#endif
 #include "internal.h"
+
+struct environment_io_credentials {
+    const struct cred *old;
+    void (*restore)(const struct cred *);
+};
+
+static int environment_file_credentials(struct file *file,
+                                        struct environment_io_credentials *state)
+{
+    const struct cred *(*use)(const struct cred *);
+
+    use = (void *)sgame_sim_lookup_name("override_creds");
+    state->restore = (void *)sgame_sim_lookup_name("revert_creds");
+    if (!use || !state->restore)
+        return -EOPNOTSUPP;
+    /* The service kthread has kernel credentials. VFS permission checks
+     * must use the credentials that opened this retained target file. */
+    state->old = use(file->f_cred);
+    return 0;
+}
 
 #ifndef SGAME_SIM_IDS_510
 #ifdef __KERNEL__
@@ -100,6 +123,8 @@ long sgame_sim_mem_file_read8(struct sgame_sim_file_read8_req *req)
     struct file *file = environment_file(req->pid, req->fd, req->start_time);
     loff_t position = 0;
     ssize_t bytes;
+    struct environment_io_credentials credentials;
+    int ret;
     ssize_t (*read_file)(struct file *, void *, size_t, loff_t *);
 
     if (IS_ERR(file))
@@ -117,7 +142,13 @@ long sgame_sim_mem_file_read8(struct sgame_sim_file_read8_req *req)
         fput(file);
         return -EOPNOTSUPP;
     }
+    ret = environment_file_credentials(file, &credentials);
+    if (ret) {
+        fput(file);
+        return ret;
+    }
     bytes = read_file(file, &req->out_value, sizeof(req->out_value), &position);
+    credentials.restore(credentials.old);
     fput(file);
     return bytes == sizeof(req->out_value) ? 0 : bytes < 0 ? bytes : -EIO;
 }
@@ -126,6 +157,7 @@ long sgame_sim_mem_file_stat(struct sgame_sim_file_stat_req *req)
 {
     struct file *file = environment_file(req->pid, req->fd, req->start_time);
     struct kstat stat;
+    struct environment_io_credentials credentials;
     u32 uid, gid;
     int ret;
     int (*getattr)(const struct path *, struct kstat *, u32, unsigned int);
@@ -137,7 +169,13 @@ long sgame_sim_mem_file_stat(struct sgame_sim_file_stat_req *req)
         fput(file);
         return -EOPNOTSUPP;
     }
+    ret = environment_file_credentials(file, &credentials);
+    if (ret) {
+        fput(file);
+        return ret;
+    }
     ret = getattr(&file->f_path, &stat, STATX_BASIC_STATS, AT_STATX_SYNC_AS_STAT);
+    credentials.restore(credentials.old);
     fput(file);
     if (ret)
         return ret;

@@ -25,7 +25,9 @@ typedef uint32_t u32;
 struct dentry { struct { const char *name; } d_name; };
 struct path { struct dentry *dentry; };
 struct inode { unsigned mode_pad; unsigned i_mode; int64_t size; };
-struct file { struct path f_path; struct inode inode; int refs; int64_t f_pos; uint64_t value; };
+struct cred { int id; } worker_cred, original_cred;
+static const struct cred *effective_cred = &worker_cred;
+struct file { struct path f_path; struct inode inode; int refs; int64_t f_pos; uint64_t value; const struct cred *f_cred; };
 struct fdtable { unsigned max_fds; struct file *fd[4]; };
 struct files_struct { int file_lock; struct fdtable table; };
 struct signal_struct { int cred_guard_mutex; };
@@ -62,11 +64,20 @@ static void spin_unlock(int *lock) { assert(*lock); *lock = 0; }
 #define files_fdtable(f) (&(f)->table)
 #define rcu_dereference_raw(p) (p)
 static void get_file(struct file *f) { assert(files.file_lock); ++f->refs; }
-static void fput(struct file *f) { assert(!files.file_lock && !task.locked && !signal_state.cred_guard_mutex && f->refs == 2); --f->refs; }
+static void fput(struct file *f) { assert(!files.file_lock && !task.locked && !signal_state.cred_guard_mutex && f->refs == 2 && effective_cred == &worker_cred); --f->refs; }
+static const struct cred *override_creds(const struct cred *cred) {
+    assert(effective_cred == &worker_cred && cred == &original_cred);
+    effective_cred = cred; return &worker_cred;
+}
+static void revert_creds(const struct cred *cred) {
+    assert(effective_cred == &original_cred && cred == &worker_cred);
+    effective_cred = cred;
+}
 #define file_inode(f) (&(f)->inode)
 #define i_size_read(i) ((i)->size)
 static ssize_t kernel_read(struct file *f, void *out, size_t bytes, loff_t *position) {
     assert(!rcu_depth && !task.locked && !signal_state.cred_guard_mutex && !files.file_lock);
+    assert(effective_cred == &original_cred);
     assert(f == &original && f->refs == 2 && bytes == 8 && *position == 0);
     ++read_calls;
     if (replace_during_read) files.table.fd[3] = &replacement;
@@ -80,12 +91,15 @@ static unsigned from_kuid_munged(void *ns, unsigned uid) { assert(ns == &task); 
 static unsigned from_kgid_munged(void *ns, unsigned gid) { assert(ns == &task); return gid + 20; }
 #endif
 static int vfs_getattr(const struct path *p, struct kstat *out, unsigned mask, unsigned flags) {
+    assert(effective_cred == &original_cred);
     assert(p == &original.f_path && original.refs == 2 && !task.locked && !files.file_lock);
     assert(mask == STATX_BASIC_STATS && flags == AT_STATX_SYNC_AS_STAT);
     ++stat_calls; *out = stat_result; return stat_error;
 }
 unsigned long sgame_sim_lookup_name(const char *symbol) {
     if (missing_symbol && !strcmp(missing_symbol, symbol)) return 0;
+    if (!strcmp(symbol, "override_creds")) return (unsigned long)override_creds;
+    if (!strcmp(symbol, "revert_creds")) return (unsigned long)revert_creds;
     if (!strcmp(symbol, "overflowuid")) return (unsigned long)&overflow_uid;
     if (!strcmp(symbol, "overflowgid")) return (unsigned long)&overflow_gid;
     if (!strcmp(symbol, "kernel_read")) return (unsigned long)kernel_read;
@@ -98,10 +112,11 @@ static void balanced(void) {
     assert(task.refs == 1 && original.refs == 1 && replacement.refs == 1);
     assert(!rcu_depth && !files.file_lock && !task.locked && !signal_state.cred_guard_mutex);
     assert(original.f_pos == 77 && replacement.f_pos == 88);
+    assert(effective_cred == &worker_cred);
 }
 static void reset(void) {
     name.d_name.name = "memfd:environment";
-    original = (struct file){.f_path = {&name}, .inode = {.i_mode = S_IFREG | 0600, .size = 8}, .refs = 1, .f_pos = 77, .value = 0x1029384756abcdefULL};
+    original = (struct file){.f_path = {&name}, .inode = {.i_mode = S_IFREG | 0600, .size = 8}, .refs = 1, .f_pos = 77, .value = 0x1029384756abcdefULL, .f_cred = &original_cred};
     replacement = (struct file){.refs = 1, .f_pos = 88, .value = 99};
     files = (struct files_struct){.table = {.max_fds = 4, .fd = {NULL, NULL, NULL, &original}}};
     signal_state = (struct signal_struct){0};
@@ -156,6 +171,11 @@ int main(void) {
     assert(sgame_sim_mem_file_stat(&req) == -EOPNOTSUPP); balanced();
     missing_symbol = "kernel_read";
     assert(sgame_sim_mem_file_read8(&read) == -EOPNOTSUPP); balanced();
+    for (int i = 0; i < 2; ++i) {
+        missing_symbol = i ? "revert_creds" : "override_creds";
+        assert(sgame_sim_mem_file_stat(&req) == -EOPNOTSUPP); balanced();
+        assert(sgame_sim_mem_file_read8(&read) == -EOPNOTSUPP); balanced();
+    }
 #if SGAME_SIM_IDS_510
     reset();
     missing_symbol = "overflowgid";

@@ -150,7 +150,7 @@ def main():
             raise SystemExit('wrong module metadata: ' + item)
     required = {'get_swap_device', 'swap_duplicate', 'lookup_swap_cache',
                 'read_swap_cache_async', '__lock_page_killable', 'overflowuid',
-                'overflowgid', 'kernel_read', 'vfs_getattr'}
+                'overflowgid', 'kernel_read', 'vfs_getattr', 'override_creds', 'revert_creds'}
     releases = {'swap_free', 'swap_free_nr', 'free_swap_and_cache_nr', 'free_swap_and_cache'}
     lookups = {line.split()[-1]: line for line in (out / 'System.map').read_text().splitlines()
                if line.split() and line.split()[-1] in required | releases}

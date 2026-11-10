@@ -8,6 +8,7 @@
 #include <linux/mm.h>
 #include <linux/mm_types.h>
 #include <linux/highmem.h>
+#include <linux/swap.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/version.h>

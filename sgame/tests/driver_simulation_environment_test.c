@@ -10,6 +10,12 @@
 
 typedef uint64_t u64;
 typedef uint32_t u32;
+#ifndef SGAME_SIM_IDS_510
+#define SGAME_SIM_IDS_510 0
+#endif
+#define __kuid_val(v) (v)
+#define __kgid_val(v) (v)
+#define READ_ONCE(v) (v)
 #define PIDTYPE_PID 0
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
 #define PTR_ERR(p) ((long)(intptr_t)(p))
@@ -39,6 +45,7 @@ static int rcu_depth, mutex_error, read_calls, stat_calls, stat_error;
 static ssize_t read_result;
 static int present = 1, replace_during_read;
 static const char *missing_symbol;
+static int overflow_uid = 61234, overflow_gid = 62333;
 
 static void rcu_read_lock(void) { assert(!rcu_depth); ++rcu_depth; }
 static void rcu_read_unlock(void) { assert(rcu_depth == 1); --rcu_depth; }
@@ -67,9 +74,11 @@ static ssize_t kernel_read(struct file *f, void *out, size_t bytes, loff_t *posi
     return read_result;
 }
 static uint64_t huge_encode_dev(uint64_t dev) { return dev + 0x100000000ULL; }
+#if !SGAME_SIM_IDS_510
 static void *current_user_ns(void) { return &task; }
 static unsigned from_kuid_munged(void *ns, unsigned uid) { assert(ns == &task); return uid + 10; }
 static unsigned from_kgid_munged(void *ns, unsigned gid) { assert(ns == &task); return gid + 20; }
+#endif
 static int vfs_getattr(const struct path *p, struct kstat *out, unsigned mask, unsigned flags) {
     assert(p == &original.f_path && original.refs == 2 && !task.locked && !files.file_lock);
     assert(mask == STATX_BASIC_STATS && flags == AT_STATX_SYNC_AS_STAT);
@@ -77,6 +86,8 @@ static int vfs_getattr(const struct path *p, struct kstat *out, unsigned mask, u
 }
 unsigned long sgame_sim_lookup_name(const char *symbol) {
     if (missing_symbol && !strcmp(missing_symbol, symbol)) return 0;
+    if (!strcmp(symbol, "overflowuid")) return (unsigned long)&overflow_uid;
+    if (!strcmp(symbol, "overflowgid")) return (unsigned long)&overflow_gid;
     if (!strcmp(symbol, "kernel_read")) return (unsigned long)kernel_read;
     assert(!strcmp(symbol, "vfs_getattr")); return (unsigned long)vfs_getattr;
 }
@@ -132,7 +143,9 @@ int main(void) {
     memset(&req.out_stat, 0xff, sizeof req.out_stat);
     assert(!sgame_sim_mem_file_stat(&req) && stat_calls == 1); balanced();
     assert(req.out_stat.dev == 0x100000011ULL && req.out_stat.rdev == 0x100000012ULL);
-    assert(req.out_stat.ino == stat_result.ino && req.out_stat.uid == 1010 && req.out_stat.gid == 1021);
+    assert(req.out_stat.ino == stat_result.ino);
+    assert(req.out_stat.uid == (SGAME_SIM_IDS_510 ? 1000 : 1010));
+    assert(req.out_stat.gid == (SGAME_SIM_IDS_510 ? 1001 : 1021));
     assert(req.out_stat.size == 8 && req.out_stat.blksize == 4096 && req.out_stat.blocks == 1);
     assert(req.out_stat.atime_sec == -7 && req.out_stat.atime_ns == 11 && req.out_stat.mtime_sec == 12 && req.out_stat.ctime_ns == 15);
     assert(!req.out_stat.pad0 && !req.out_stat.pad1 && !req.out_stat.unused);
@@ -143,5 +156,17 @@ int main(void) {
     assert(sgame_sim_mem_file_stat(&req) == -EOPNOTSUPP); balanced();
     missing_symbol = "kernel_read";
     assert(sgame_sim_mem_file_read8(&read) == -EOPNOTSUPP); balanced();
+#if SGAME_SIM_IDS_510
+    reset();
+    missing_symbol = "overflowgid";
+    assert(!sgame_sim_mem_file_stat(&req) && req.out_stat.size == 8 && req.out_stat.gid == 1001); balanced();
+    stat_result.gid = (u32)-1;
+    assert(sgame_sim_mem_file_stat(&req) == -EOPNOTSUPP); balanced();
+    missing_symbol = NULL;
+    assert(!sgame_sim_mem_file_stat(&req) && req.out_stat.gid == (u32)overflow_gid); balanced();
+    stat_result.uid = (u32)-1;
+    assert(!sgame_sim_mem_file_stat(&req) && req.out_stat.uid == (u32)overflow_uid); balanced();
+    puts("PASS: 5.10 stat IDs use configured overflow values; missing overflow symbol does not gate ordinary file stat");
+#endif
     puts("environment: process identity, one pinned file/read, FD replacement, unchanged f_pos, ARM64 stat and error/reference paths passed");
 }

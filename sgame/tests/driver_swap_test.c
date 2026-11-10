@@ -163,6 +163,14 @@ static void *kmap_local_page(struct page *p) { assert(p->folio->locked); return 
 static void kunmap_local(void *v) { (void)v; }
 #if SGAME_SWAP_LEGACY
 static int lock_page_killable(struct page *p) { return folio_lock_killable(p->folio); }
+static struct page *compound_head(struct page *p) { return p->folio->page; }
+#define might_sleep() assert(!spin_depth && !rcu_depth)
+static bool trylock_page(struct page *p) {
+    assert(!spin_depth && !rcu_depth && !p->folio->locked);
+    if (during_wait || p->folio->lock_error) return false;
+    p->folio->locked = true;
+    return true;
+}
 static void unlock_page(struct page *p) { folio_unlock(p->folio); }
 #define PageSwapCache(p) ((p)->folio->swapcache)
 #define PageUptodate(p) ((p)->folio->uptodate)
@@ -249,6 +257,9 @@ static struct page *read_async(swp_entry_t e, gfp_t g, struct vm_area_struct *v,
 #endif
 }
 static unsigned long generic_kallsyms_lookup_name(const char *name) {
+#if SGAME_SWAP_LEGACY
+    if (!strcmp(name, "__lock_page_killable")) return (unsigned long)lock_page_killable;
+#endif
     if (!strcmp(name, "get_swap_device")) return (unsigned long)get_device;
     if (!strcmp(name, "swap_duplicate")) return (unsigned long)duplicate;
     if (!strcmp(name, SGAME_SWAP_LEGACY ? "lookup_swap_cache" : "swap_cache_get_folio"))

@@ -9,6 +9,33 @@
 #include <linux/user_namespace.h>
 #include "internal.h"
 
+#ifndef SGAME_SIM_IDS_510
+#ifdef __KERNEL__
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0) && !defined(CONFIG_USER_NS)
+#define SGAME_SIM_IDS_510 1
+#endif
+#endif
+#ifndef SGAME_SIM_IDS_510
+#define SGAME_SIM_IDS_510 0
+#endif
+#endif
+
+#if SGAME_SIM_IDS_510
+static int environment_overflow_id(const char *symbol, u32 *value)
+{
+    const int *overflow;
+
+    if (*value != (u32)-1)
+        return 0;
+    overflow = (const int *)sgame_sim_lookup_name(symbol);
+    if (!overflow)
+        return -EOPNOTSUPP;
+    *value = READ_ONCE(*overflow);
+    return 0;
+}
+#endif
+
 static struct task_struct *environment_task(int pid)
 {
     struct task_struct *task;
@@ -99,6 +126,7 @@ long sgame_sim_mem_file_stat(struct sgame_sim_file_stat_req *req)
 {
     struct file *file = environment_file(req->pid, req->fd, req->start_time);
     struct kstat stat;
+    u32 uid, gid;
     int ret;
     int (*getattr)(const struct path *, struct kstat *, u32, unsigned int);
 
@@ -113,11 +141,25 @@ long sgame_sim_mem_file_stat(struct sgame_sim_file_stat_req *req)
     fput(file);
     if (ret)
         return ret;
+#if SGAME_SIM_IDS_510
+    /* No namespace translation is needed on this 5.10 configuration.
+     * The overflow sysctls are not in every vendor KMI. Resolve them only
+     * when an invalid ID actually needs the configured overflow value. */
+    uid = __kuid_val(stat.uid);
+    gid = __kgid_val(stat.gid);
+    ret = environment_overflow_id("overflowuid", &uid);
+    if (!ret)
+        ret = environment_overflow_id("overflowgid", &gid);
+    if (ret)
+        return ret;
+#else
+    uid = from_kuid_munged(current_user_ns(), stat.uid);
+    gid = from_kgid_munged(current_user_ns(), stat.gid);
+#endif
     req->out_stat = (struct sgame_sim_stat) {
         .dev = huge_encode_dev(stat.dev), .ino = stat.ino,
         .mode = stat.mode, .nlink = stat.nlink,
-        .uid = from_kuid_munged(current_user_ns(), stat.uid),
-        .gid = from_kgid_munged(current_user_ns(), stat.gid),
+        .uid = uid, .gid = gid,
         .rdev = huge_encode_dev(stat.rdev), .size = stat.size,
         .blksize = stat.blksize, .blocks = stat.blocks,
         .atime_sec = stat.atime.tv_sec, .atime_ns = stat.atime.tv_nsec,

@@ -52,7 +52,8 @@
     "Memory reads retain the existing Swap-aware lsdriver reader; no upstream NC reader or install hook is imported.",
     "GKI-unexported kernel_read and vfs_getattr use exact typed runtime symbol lookup; builds verify both symbols in System.map.",
     "KernelServices supplies all simulation environment queries for both custom read modes; Unicorn remains in userspace.",
-    "Android 5.10 Bionic VMA names use target-mm GUP and balanced page references, matching fs/proc/task_mmu.c; newer kernels retain kernel-owned name objects."
+    "Android 5.10 Bionic VMA names use target-mm GUP and balanced page references, matching fs/proc/task_mmu.c; newer kernels retain kernel-owned name objects.",
+    "Android 5.10 CONFIG_USER_NS=n copies valid UID/GID values directly and resolves overflow sysctl variables only for invalid IDs, avoiding KMI-unexported overflowgid without gating ordinary stat."
   ],
   "target_kernels": [
     "6.1.138",

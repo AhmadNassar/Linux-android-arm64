@@ -59,6 +59,7 @@ static struct {
     void (*free_and_cache_nr)(swp_entry_t entry, int nr_pages);
     int (*free_and_cache)(swp_entry_t entry);
 #if SGAME_SWAP_LEGACY
+    int (*lock_killable)(struct page *page);
     struct page *(*cache_get)(swp_entry_t entry, struct vm_area_struct *vma, unsigned long addr);
     struct page *(*read_async)(swp_entry_t entry, gfp_t mask, struct vm_area_struct *vma,
                                unsigned long addr, bool do_poll);
@@ -87,6 +88,7 @@ static int sgame_swap_init(void)
     SGAME_SWAP_SYMBOL(get_device, "get_swap_device");
     SGAME_SWAP_SYMBOL(duplicate, "swap_duplicate");
 #if SGAME_SWAP_LEGACY
+    SGAME_SWAP_SYMBOL(lock_killable, "__lock_page_killable");
     SGAME_SWAP_SYMBOL(cache_get, "lookup_swap_cache");
 #else
     SGAME_SWAP_SYMBOL(cache_get, "swap_cache_get_folio");
@@ -366,7 +368,12 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
     /* read_async can return a locked, not-yet-uptodate page. No PTL is held
      * while waiting. The folio lock also stabilizes swapcache ownership. */
 #if SGAME_SWAP_LEGACY
-    status = lock_page_killable(page);
+    {
+        struct page *head = compound_head(page);
+
+        might_sleep();
+        status = trylock_page(head) ? 0 : sgame_swap_api.lock_killable(head);
+    }
 #else
     status = folio_lock_killable(folio);
 #endif

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 
 HERE = Path(__file__).resolve().parent
@@ -32,6 +33,7 @@ def main():
     parser.add_argument('--kernel', required=True, type=Path)
     parser.add_argument('--clang', required=True, type=Path)
     parser.add_argument('--host-tools', type=Path)
+    parser.add_argument('--kernel-host-tools', type=Path)
     parser.add_argument('--jobs', type=int, default=16)
     args = parser.parse_args()
     baseline = json.loads((HERE / '5.10-baselines.json').read_text())[args.variant]
@@ -53,14 +55,39 @@ def main():
     artifacts.mkdir(parents=True, exist_ok=True)
     out = work / 'out'
     env = dict(os.environ)
-    host_bin = str(args.host_tools.resolve() / 'linux-x86/bin') + ':' if args.host_tools else ''
-    env.update(PATH=str(clang / 'bin') + ':' + host_bin + env['PATH'],
+    host_paths = []
+    hostcc, hostcxx = 'gcc', 'g++'
+    private_tools = work / 'host-bin'
+    private_tools.mkdir(parents=True, exist_ok=True)
+    if args.host_tools:
+        host = args.host_tools.resolve()
+        host_paths.append(str(host / 'linux-x86/bin'))
+        bc = private_tools / 'bc'
+        if not bc.exists():
+            bc.symlink_to(host / 'linux-x86/bin/gavinhoward-bc')
+    kernel_host = args.kernel_host_tools
+    if kernel_host is None and args.host_tools:
+        kernel_host = args.host_tools.resolve().parent / 'kernel-build-tools'
+    if kernel_host:
+        host = kernel_host.resolve() / 'linux-x86'
+        host_paths.append(str(host / 'bin'))
+        library = str(host / 'lib64')
+        flags = ['-I' + str(host / 'include'), '-L' + library, '-Wl,-rpath,' + library]
+        # tools/bpf and Kbuild both use HOSTCC. Keep the host ELF/OpenSSL
+        # headers confined to host compilation instead of target include paths.
+        for compiler in ('gcc', 'g++'):
+            wrapper = private_tools / compiler
+            wrapper.write_text('#!/bin/sh\nexec ' + shlex.join([shutil.which(compiler), *flags]) + ' "$@"\n')
+            wrapper.chmod(0o755)
+        hostcc, hostcxx = str(private_tools / 'gcc'), str(private_tools / 'g++')
+        env['LD_LIBRARY_PATH'] = library + ':' + env.get('LD_LIBRARY_PATH', '')
+    env.update(PATH=':'.join([str(clang / 'bin'), str(private_tools), *host_paths, env['PATH']]),
                BRANCH=baseline['branch'], KMI_GENERATION=str(baseline['kmi_generation']),
                KBUILD_BUILD_USER='sgame', KBUILD_BUILD_HOST='gki-build',
                KBUILD_BUILD_TIMESTAMP='2026-11-10 00:00:00 UTC')
     make = ['make', '-C', str(kernel), 'O=' + str(out), 'ARCH=arm64',
             'LLVM=1', 'LLVM_IAS=1', 'CROSS_COMPILE=aarch64-linux-gnu-',
-            'HOSTCC=gcc', 'HOSTCXX=g++', 'KCFLAGS=-D__ANDROID_COMMON_KERNEL__',
+            'HOSTCC=' + hostcc, 'HOSTCXX=' + hostcxx, 'KCFLAGS=-D__ANDROID_COMMON_KERNEL__',
             '-j' + str(args.jobs)]
     if not (out / '.config').exists():
         run(*make, 'gki_defconfig', env=env)

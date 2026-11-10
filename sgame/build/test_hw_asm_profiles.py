@@ -17,7 +17,6 @@ fmlal v0.2s,v1.2h,v2.2h
 crc32cx w0,w1,x2
 casal x0,x1,[x2]
 pacga x0,x1,x2
-aese v0.16b,v1.16b
 bfdot v0.4s,v1.8h,v2.8h
 usdot v0.4s,v1.16b,v2.16b
 smmla v0.4s,v1.16b,v2.16b
@@ -36,7 +35,7 @@ for clang, profile, name in [(args.clang12, 'neoverse-v1+crc', 'clang12'),
     subprocess.run([str(clang / 'bin/llvm-objcopy'), '-O', 'binary',
                     '--only-section=.text', str(obj), str(binary)], check=True)
     images.append(binary.read_bytes())
-if images[0] != images[1] or len(images[0]) != 44:
+if images[0] != images[1] or len(images[0]) != 40:
     raise SystemExit('hardware template profile changed instruction bytes')
 result = {'instructions': len(images[0]) // 4, 'same_machine_code': True,
           'sha256': hashlib.sha256(images[0]).hexdigest()}

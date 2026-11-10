@@ -369,6 +369,17 @@ int main(void) {
     read_cases(NO_SWAP_FREE | NO_FREE_AND_CACHE);
     assert(sgame_swap_api.free_nr == free_nr);
 
+#if SGAME_SWAP_LEGACY
+    for (int from_cache = 0; from_cache < 2; ++from_cache) {
+        u8 out[8];
+        reset(); make_swap(0, 3); hit = from_cache;
+        folios[2].nr_pages = 2; pages[3].folio = &folios[2];
+        assert(sgame_swap_read(&test_mm, TEST_BASE, out, sizeof(out)) == sizeof(out));
+        assert(out[0] == 3 && cache_calls == 1 && backend_calls == !from_cache); clean();
+    }
+    puts("PASS: 5.10 compound-page tails from cache/backend retain the exact slot and head lock");
+#endif
+
 #if SGAME_SWAP_MODERN
     u8 out[8];
     reset(); make_resident(0, 2); replace_table_at = 1;

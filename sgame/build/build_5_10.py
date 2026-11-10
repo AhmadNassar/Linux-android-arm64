@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import shlex
 import subprocess
+import sys
 
 HERE = Path(__file__).resolve().parent
 
@@ -60,6 +61,9 @@ def main():
     hostcc, hostcxx = 'gcc', 'g++'
     private_tools = work / 'host-bin'
     private_tools.mkdir(parents=True, exist_ok=True)
+    python = private_tools / 'python'
+    if not python.exists():
+        python.symlink_to(sys.executable)
     if args.host_tools:
         host = args.host_tools.resolve()
         host_paths.append(str(host / 'linux-x86/bin'))

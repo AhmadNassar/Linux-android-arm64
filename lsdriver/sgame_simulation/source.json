@@ -51,12 +51,14 @@
     "Exported sprint_symbol provides the same offset/size span instead of unexported kallsyms_lookup_size_offset.",
     "Memory reads retain the existing Swap-aware lsdriver reader; no upstream NC reader or install hook is imported.",
     "GKI-unexported kernel_read and vfs_getattr use exact typed runtime symbol lookup; builds verify both symbols in System.map.",
-    "KernelServices supplies all simulation environment queries for both custom read modes; Unicorn remains in userspace."
+    "KernelServices supplies all simulation environment queries for both custom read modes; Unicorn remains in userspace.",
+    "Android 5.10 Bionic VMA names use target-mm GUP and balanced page references, matching fs/proc/task_mmu.c; newer kernels retain kernel-owned name objects."
   ],
   "target_kernels": [
     "6.1.138",
     "6.12.23",
-    "6.12.58"
+    "6.12.58",
+    "5.10.237"
   ],
   "target_page_sizes": {
     "6.1.138": [
@@ -67,6 +69,9 @@
     ],
     "6.12.58": [
       "4k"
+    ],
+    "5.10.237": [
+      "4k"
     ]
   },
   "target_android16_kmi": {
@@ -76,5 +81,9 @@
   "read_modes": [
     "cached",
     "nc"
-  ]
+  ],
+  "target_android_5_10_kmi": {
+    "android12": 9,
+    "android13": 4
+  }
 }

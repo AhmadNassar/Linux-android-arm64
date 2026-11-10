@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--clang', required=True, type=Path)
     parser.add_argument('--host-tools', type=Path)
     parser.add_argument('--kernel-host-tools', type=Path)
+    parser.add_argument('--host-sysroot', type=Path)
     parser.add_argument('--jobs', type=int, default=16)
     args = parser.parse_args()
     baseline = json.loads((HERE / '5.10-baselines.json').read_text())[args.variant]
@@ -62,9 +63,11 @@ def main():
     if args.host_tools:
         host = args.host_tools.resolve()
         host_paths.append(str(host / 'linux-x86/bin'))
-        bc = private_tools / 'bc'
-        if not bc.exists():
-            bc.symlink_to(host / 'linux-x86/bin/gavinhoward-bc')
+        for name, target in [('bc', host / 'linux-x86/bin/gavinhoward-bc'),
+                             ('cpio', host / 'path/linux-x86/cpio')]:
+            tool = private_tools / name
+            if not tool.exists():
+                tool.symlink_to(target)
     kernel_host = args.kernel_host_tools
     if kernel_host is None and args.host_tools:
         kernel_host = args.host_tools.resolve().parent / 'kernel-build-tools'
@@ -73,6 +76,11 @@ def main():
         host_paths.append(str(host / 'bin'))
         library = str(host / 'lib64')
         flags = ['-I' + str(host / 'include'), '-L' + library, '-Wl,-rpath,' + library]
+        if args.host_sysroot:
+            root = args.host_sysroot.resolve()
+            native_library = str(root / 'usr/lib/x86_64-linux-gnu')
+            flags += ['-I' + str(root / 'usr/include'), '-L' + native_library,
+                      '-Wl,-rpath,' + native_library]
         # tools/bpf and Kbuild both use HOSTCC. Keep the host ELF/OpenSSL
         # headers confined to host compilation instead of target include paths.
         for compiler in ('gcc', 'g++'):

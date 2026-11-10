@@ -87,6 +87,11 @@ Repeat with the NC export and the same kernel workspaces to reuse the GKI build.
 The script retains GKI CFI/LTO, builds the kernel symbol tables, checks actual
 imports and required dynamic lookups, and records source/ELF hashes and metadata.
 The host reader fixture includes both 5.10 modes and rejects RCU held across I/O.
+Android 5.10 Bionic stack names are read from the target mm using the same GUP
+protocol as its proc maps reader. The name fixture checks every page offset,
+cross-page names, exact matches and cleanup after partial pinning.
+For minimal build hosts, `--host-sysroot` accepts privately extracted native
+development packages (including zlib headers); system package changes are unnecessary.
 
 No rebuilt `.ko` is included in this source migration. Existing application/phone modules remain
 historical artifacts until the server builds and device verification complete. Hidden modules

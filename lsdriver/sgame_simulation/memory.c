@@ -7,6 +7,7 @@
 #include <linux/sched/task.h>
 #include <linux/mm.h>
 #include <linux/mm_types.h>
+#include <linux/highmem.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/version.h>
@@ -28,6 +29,19 @@
 #endif
 
 #include "internal.h"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0) && !defined(CONFIG_ANON_VMA_NAME)
+#include "vma_name_510.h"
+#define SGAME_SIM_ANON_NAME_510 1
+#else
+#define SGAME_SIM_ANON_NAME_510 0
+#endif
+
+#if defined(CONFIG_ANON_VMA_NAME) || SGAME_SIM_ANON_NAME_510
+#define SGAME_SIM_THREAD_STACK 1
+#else
+#define SGAME_SIM_THREAD_STACK 0
+#endif
 
 /* ---- pid / module base ---- */
 
@@ -567,29 +581,35 @@ long sgame_sim_mem_get_thread_tids(struct mem_get_thread_tids_req *arg)
     return 0;
 }
 
-#ifdef CONFIG_ANON_VMA_NAME
+#if SGAME_SIM_THREAD_STACK
 static bool mem_is_named_thread_stack_vma(struct vm_area_struct *vma,
                                           const char *expected_name)
 {
+#if !SGAME_SIM_ANON_NAME_510
     struct anon_vma_name *anon_name;
+#endif
 
     if (vma->vm_file)
         return false;
     if ((vma->vm_flags & (VM_READ | VM_WRITE)) != (VM_READ | VM_WRITE))
         return false;
 
+#if SGAME_SIM_ANON_NAME_510
+    return sgame_sim_vma_name_510(vma->vm_mm, vma_get_anon_name(vma), expected_name);
+#else
     /* The Android 15 DDK does not expose anon_vma_name() to external-module
      * headers. Direct access is valid here because the caller holds mmap_lock
      * and vm_file was checked above. */
     anon_name = vma->anon_name;
     return anon_name && strcmp(anon_name->name, expected_name) == 0;
+#endif
 }
 #endif
 
 long sgame_sim_mem_get_thread_stack(struct mem_get_thread_stack_req *arg)
 {
     struct mem_get_thread_stack_req *req = arg;
-#ifdef CONFIG_ANON_VMA_NAME
+#if SGAME_SIM_THREAD_STACK
     struct task_struct *task;
     struct mm_struct *mm;
     struct vm_area_struct *vma;
@@ -609,7 +629,7 @@ long sgame_sim_mem_get_thread_stack(struct mem_get_thread_stack_req *arg)
     req->out_high = 0;
     req->out_tls = 0;
 
-#ifndef CONFIG_ANON_VMA_NAME
+#if !SGAME_SIM_THREAD_STACK
     return -EOPNOTSUPP;
 #else
     task = mem_find_get_task(req->tid);

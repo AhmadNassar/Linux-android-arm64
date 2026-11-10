@@ -24,6 +24,8 @@ PY
 "$SIM_CC" -std=gnu11 "${SIM_FLAGS[@]}" -Wno-sign-compare -I"$OUT_DIR/kernel-stubs" \
     sgame/tests/driver_simulation_environment_test.c -o "$OUT_DIR/environment-test"
 "$OUT_DIR/environment-test"
+"$SIM_CC" -std=gnu11 "${SIM_FLAGS[@]}" sgame/tests/driver_vma_name_510_test.c -o "$OUT_DIR/vma-name-510-test"
+"$OUT_DIR/vma-name-510-test"
 "$SIM_CC" -std=gnu11 "${SIM_FLAGS[@]}" -DSGAME_SIM_TEST_LIBRARY \
     -c sgame/tests/driver_simulation_test.c -o "$OUT_DIR/fixture.o"
 "$SIM_CXX" -std=c++20 "${SIM_FLAGS[@]}" -pthread -Iandroid/jni \

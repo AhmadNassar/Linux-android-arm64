@@ -42,6 +42,7 @@ struct stepbp_task_step
     unsigned long generation;
     unsigned long pc;
     bool valid;
+    unsigned int syscall_exit_depth;
 };
 static DEFINE_HASHTABLE(g_stepbp_task_steps, 8);
 
@@ -49,22 +50,43 @@ static DEFINE_HASHTABLE(g_stepbp_task_steps, 8);
  * instruction, producing an ISV=0 trap at the PC already delivered. Track every
  * thread's previous step, so only that replay is skipped. ISV=1 self branches
  * and first arrivals after an instruction with no syndrome still count. */
-static bool stepbp_replayed_pc_locked(struct pt_regs *regs, unsigned long esr, int native_result)
+static struct stepbp_task_step *stepbp_task_state_locked(struct task_struct *task, bool create)
 {
     struct stepbp_task_step *state;
-    bool replay;
 
-    hash_for_each_possible(g_stepbp_task_steps, state, node, (unsigned long)current->pid)
+    hash_for_each_possible(g_stepbp_task_steps, state, node, (unsigned long)task->pid)
     {
-        if (state->tid == current->pid) goto found;
+        if (state->tid == task->pid) goto found;
     }
+    if (!create) return NULL;
     state = kzalloc(sizeof(*state), GFP_ATOMIC);
-    if (!state) return false;
-    state->tid = current->pid;
+    if (!state) return NULL;
+    state->tid = task->pid;
     hash_add(g_stepbp_task_steps, &state->node, (unsigned long)state->tid);
 found:
-    replay = state->valid && state->start_time == current->start_time && state->generation == g_stepbp_generation && state->pc == regs->pc && !(esr & BIT(24));
-    state->start_time = current->start_time;
+    if (state->start_time != task->start_time)
+    {
+        state->start_time = task->start_time;
+        state->valid = false;
+        state->syscall_exit_depth = 0;
+    }
+    return state;
+}
+
+static bool stepbp_task_exiting_syscall_locked(struct task_struct *task)
+{
+    struct stepbp_task_step *state = stepbp_task_state_locked(task, false);
+
+    return state && state->syscall_exit_depth;
+}
+
+static bool stepbp_replayed_pc_locked(struct pt_regs *regs, unsigned long esr, int native_result)
+{
+    struct stepbp_task_step *state = stepbp_task_state_locked(current, true);
+    bool replay;
+
+    if (!state) return false;
+    replay = state->valid && state->generation == g_stepbp_generation && state->pc == regs->pc && !(esr & BIT(24));
     state->generation = g_stepbp_generation;
     state->pc = regs->pc;
     state->valid = native_result != DBG_HOOK_HANDLED;
@@ -92,6 +114,7 @@ struct stepbp_return_frame
     unsigned long return_addr;
     unsigned long generation;
     struct pt_regs *regs;
+    struct stepbp_task_step *task_state;
 };
 
 static inline void stepbp_publish_monitor(struct break_point *info, bool stopping)
@@ -141,8 +164,12 @@ static inline void stepbp_disable_current_hardware_step(struct pt_regs *regs)
 
 static inline void stepbp_apply_task_single_step(struct task_struct *task, bool enable)
 {
-    if (enable) stepbp_enable_task_single_step(task);
+    unsigned long flags;
+
+    spin_lock_irqsave(&g_stepbp_lock, flags);
+    if (enable && !stepbp_task_exiting_syscall_locked(task)) stepbp_enable_task_single_step(task);
     else stepbp_disable_task_single_step(task);
+    spin_unlock_irqrestore(&g_stepbp_lock, flags);
 }
 
 struct stepbp_cpu_update
@@ -154,11 +181,14 @@ struct stepbp_cpu_update
 static void stepbp_update_current_cpu(void *data)
 {
     struct stepbp_cpu_update *update = data;
+    unsigned long flags;
 
     if (!bp_info_targets_task(update->info, current)) return;
 
-    if (update->enable && bp_info_find_type_for_task(update->info, BP_BREAKPOINT_X, current)) stepbp_enable_task_single_step(current);
+    spin_lock_irqsave(&g_stepbp_lock, flags);
+    if (update->enable && bp_info_find_type_for_task(update->info, BP_BREAKPOINT_X, current) && !stepbp_task_exiting_syscall_locked(current)) stepbp_enable_task_single_step(current);
     else stepbp_disable_current_hardware_step(task_pt_regs(current));
+    spin_unlock_irqrestore(&g_stepbp_lock, flags);
 }
 
 static int stepbp_apply_info_tasks(struct break_point *info, bool enable)
@@ -227,6 +257,7 @@ static void __attribute__((used, __noinline__)) stepbp_finish_syscall_trace_exit
     struct break_point *info;
 
     spin_lock_irqsave(&g_stepbp_lock, flags);
+    if (frame->task_state && frame->task_state->syscall_exit_depth) frame->task_state->syscall_exit_depth--;
     if (frame->generation == g_stepbp_generation)
     {
         info = g_stepbp_info;
@@ -259,12 +290,14 @@ static int work_trampoline_stepbp_syscall_trace_exit(struct pt_regs *hook_regs)
     info = g_stepbp_info;
     target_task = g_stepbp_stopping ? bp_info_targets_task(info, current) : !!bp_info_find_type_for_task(info, BP_BREAKPOINT_X, current);
     generation = g_stepbp_generation;
-    if (target_task && test_thread_flag(TIF_SINGLESTEP))
+    if (target_task)
     {
         frame = hook_frame_metadata(hook_regs);
         frame->return_addr = hook_regs->regs[30];
         frame->generation = generation;
         frame->regs = regs;
+        frame->task_state = stepbp_task_state_locked(current, true);
+        if (frame->task_state) frame->task_state->syscall_exit_depth++;
         atomic_inc(&g_stepbp_returns_inflight);
         hook_regs->sp = (unsigned long)frame;
         hook_regs->regs[30] = (unsigned long)ret_trampoline_stepbp_syscall_trace_exit;
@@ -412,31 +445,8 @@ static int stepbp_user_single_step(struct pt_regs *regs, stepbp_esr_t esr)
     return stepbp_finish_call_step_hook(native_result, &frame, esr);
 }
 
-/* syscall_trace_exit may sleep in audit/trace callbacks. A context switch can
- * re-arm TIF_SINGLESTEP after its entry hook cleared it. At report_syscall only
- * the synthetic ptrace stop remains; skip that call for our untraced target,
- * while preserving audit, tracepoints, rseq and real ptrace syscall stops. */
-static int work_trampoline_stepbp_report_syscall(struct pt_regs *hook_regs)
-{
-    struct pt_regs *regs;
-    struct break_point *info;
-    unsigned long flags;
-    bool suppress = false;
-
-    if (!hook_regs || hook_regs->regs[1] != 1 || READ_ONCE(current->ptrace)) return 0;
-    regs = (struct pt_regs *)hook_regs->regs[0];
-    if (!regs || !user_mode(regs) || test_thread_flag(TIF_SYSCALL_TRACE)) return 0;
-
-    spin_lock_irqsave(&g_stepbp_lock, flags);
-    info = g_stepbp_info;
-    suppress = g_stepbp_stopping ? bp_info_targets_task(info, current) : !!bp_info_find_type_for_task(info, BP_BREAKPOINT_X, current);
-    spin_unlock_irqrestore(&g_stepbp_lock, flags);
-    return suppress ? 1 : 0;
-}
-
 static struct hook_entry g_stepbp_required_hooks[] = {
     HOOK_ENTRY("syscall_trace_exit", work_trampoline_stepbp_syscall_trace_exit),
-    HOOK_ENTRY("report_syscall", work_trampoline_stepbp_report_syscall),
 };
 
 static struct hook_entry g_stepbp_switch_hook[] = {

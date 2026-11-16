@@ -29,6 +29,7 @@ mapping_updates 非零时暂停执行视图；受控 VMA 拆分结束校验并�
 #include <linux/mman.h>
 #include <linux/mmu_notifier.h>
 #include <linux/mutex.h>
+#include <linux/pkeys.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>

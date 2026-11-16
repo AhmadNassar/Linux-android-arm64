@@ -36,7 +36,7 @@
 #include "virtual_memory_rw.h"
 #include "virtual_memory_enum.h"
 #include "break_point.h"
-#include "kernel_render/cpu/cpu_render.h"
+//#include "kernel_render/cpu/cpu_render.h"
 
 static struct request_obj *sgame_connected_req;
 
@@ -61,42 +61,38 @@ unsigned long sgame_sim_lookup_name(const char *name)
 }
 
 
-static int CpuRenderTestThreadFunction(void *data)
-{
-    unsigned long deadline = jiffies + 5 * HZ;
-    bool frame_open;
-    int ret;
+// static int CpuRenderTestThreadFunction(void *data)
+// {
+//     unsigned long deadline = jiffies + 5 * HZ;
+//     bool frame_open;
+//     int ret;
 
-    (void)data;
-    while (!kthread_should_stop() && time_before(jiffies, deadline))
-    {
-        frame_open = false;
-        ret = cpu_render_begin_frame();
-        if (!ret) frame_open = true;
-        if (!ret) ret = cpu_render_clear(0xff101820U);
-        if (!ret) ret = cpu_render_line(20, 80, 360, 360, 0xffff453aU, 6);
-        if (!ret) ret = cpu_render_rect(40, 120, 280, 300, 0xff30d5c8U, 4, false);
-        if (!ret) ret = cpu_render_rect(80, 160, 180, 240, 0xffffd60aU, 2, true);
-        if (!ret) ret = cpu_render_circle(320, 320, 120, 0xff64d2ffU, 6, false);
-        if (!ret) ret = cpu_render_circle(480, 420, 50, 0xffff375fU, 2, true);
-        if (!ret) ret = cpu_render_text(48, 520, "LSDRIVER", 4, 0xffffffffU);
-        if (frame_open)
-        {
-            int end_ret = cpu_render_end_frame();
+//     (void)data;
+//     while (!kthread_should_stop() && time_before(jiffies, deadline))
+//     {
+//         frame_open = false;
+//         ret = cpu_render_begin_frame();
+//         if (!ret) frame_open = true;
+//         if (!ret) ret = cpu_render_clear(0xff101820U);
+//         if (!ret) ret = cpu_render_text(224, 160, "LSDRIVER", 4, 0xffffffffU);
+//         if (!ret) ret = cpu_render_rect(140, 220, 500, 420, 0xff00ff00U, 0, true);
+//         if (frame_open)
+//         {
+//             int end_ret = cpu_render_end_frame();
 
-            frame_open = false;
-            if (!ret) ret = end_ret;
-        }
-        if (ret)
-        {
-            ls_log_always_tag("cpu_render", "测试绘制失败，错误码: %d\n", ret);
-            break;
-        }
+//             frame_open = false;
+//             if (!ret) ret = end_ret;
+//         }
+//         if (ret)
+//         {
+//             ls_log_always_tag("cpu_render", "测试绘制失败，错误码: %d\n", ret);
+//             break;
+//         }
 
-        usleep_range(8000, 8500);
-    }
-    return 0;
-}
+//         usleep_range(8000, 8500);
+//     }
+//     return 0;
+// }
 
 static int DispatchThreadFunction(void *data)
 {
@@ -171,11 +167,11 @@ static int DispatchThreadFunction(void *data)
                 case request_op_stepbp_remove:
                     remove_process_stepbp();
                     break;
-                case request_op_dptdbg_set:
-                    __atomic_store_n(&req->status, set_process_dptdbg(&req->bp_info), __ATOMIC_RELAXED);
+                case request_op_dptbp_set:
+                    __atomic_store_n(&req->status, set_process_dptbp(&req->bp_info), __ATOMIC_RELAXED);
                     break;
-                case request_op_dptdbg_remove:
-                    remove_process_dptdbg();
+                case request_op_dptbp_remove:
+                    remove_process_dptbp();
                     break;
                 case request_op_syscall_monitor_set:
                     __atomic_store_n(&req->status, syscall_monitor_install(req->tgid), __ATOMIC_RELAXED);
@@ -245,7 +241,7 @@ static inline unsigned long exit_strip_kernel_pac(unsigned long address)
 static const char *exit_watch_process_name(const char *comm)
 {
     static const char *const process_names[] = {
-        "LS", "system_server", "surfaceflinger", "com.tencent.tmgp.dfm", "com.tencent.tmgp.sgame", "com.pi.czrxdfirst", "com.bwxrk.yqmy.gz", "me.hd.ggtutorial",
+        "LS", "com.tencent.tmgp.dfm", "com.tencent.tmgp.sgame", "com.pi.czrxdfirst", "com.bwxrk.yqmy.gz", "me.hd.ggtutorial",
     };
 
     for (int i = 0; i < ARRAY_SIZE(process_names); i++)
@@ -673,6 +669,8 @@ MODULE_INFO(sgame_simulation_source, "enkernel-1c3eb28b4cae3302714d96716aab55bca
 	内核死机日志是有的，常规的标准路径/sys/fs/pstore没有，不同的厂商有不同的转储路径
 	adb shell su -c 'getprop | grep -iE "boot.reason|bootreason|panic|ramdump|pstore|reboot"'
 	这个命令即可看到厂商的ramdump是启用的
+
+    !!!!!!也可通过当前项目的panic_reserve_dump程序直接导出厂商设备崩溃转储日志,转储路径为/storage/emulated/0/dump整个文件夹!!!!!!
 KMI:
     Kernel Module Interface，内核模块接口，独有的Android GKI 概念
     GKI 核心内核镜像由 Google 统一发布；各个厂商的硬件驱动编译成独立.ko模块，只能调用 KMI 符号列表内导出的函数 / 全局变量。

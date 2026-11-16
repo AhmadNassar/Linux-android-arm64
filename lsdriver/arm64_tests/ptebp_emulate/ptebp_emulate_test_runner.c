@@ -472,10 +472,188 @@ static void compare_results(struct runner_result *result,
     result->status = RUNNER_STATUS_PASS;
 }
 
+static int check_file_bytes(int memory_fd, FILE *stream, uintptr_t base,
+                            const uint8_t *expected, uint8_t *buffer,
+                            size_t offset, size_t length, size_t element_size)
+{
+    off_t position = (off_t)(base + offset);
+    buffer[0] = 0xa5;
+    buffer[length + 1] = 0x5a;
+    if (stream)
+    {
+        if (fseek(stream, (long)position, SEEK_SET) ||
+            fread(buffer + 1, element_size, length / element_size, stream) != length / element_size ||
+            ferror(stream) || ftell(stream) != (long)(position + length)) return -1;
+    }
+    else if (lseek(memory_fd, position, SEEK_SET) != position ||
+             read(memory_fd, buffer + 1, length) != (ssize_t)length ||
+             lseek(memory_fd, 0, SEEK_CUR) != position + (off_t)length) return -1;
+
+    if (buffer[0] != 0xa5 || buffer[length + 1] != 0x5a ||
+        memcmp(buffer + 1, expected + offset, length))
+    {
+        fprintf(stderr, "file_read_mismatch api=%s offset=%zu length=%zu\n",
+                stream ? "fread" : "read", offset, length);
+        return -1;
+    }
+    return 0;
+}
+
+static int test_file_reads(int device)
+{
+    size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+    size_t total = 4 * page_size;
+    uint8_t *mapping = mmap(NULL, total + page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t *expected = malloc(total);
+    uint8_t *buffer = malloc(total + 2);
+    int memory_fd = openat(AT_FDCWD, "/proc/self/mem", O_RDONLY | O_CLOEXEC);
+    FILE *stream = fopen("/proc/self/mem", "rb");
+    char stdio_buffer[4096];
+    int status = -1;
+    size_t checks = 0;
+    size_t offset = 0;
+    size_t length = 0;
+
+    if (mapping == MAP_FAILED || !expected || !buffer || memory_fd < 0 || !stream) goto out;
+    if (setvbuf(stream, stdio_buffer, _IOFBF, sizeof(stdio_buffer))) goto out;
+
+    for (size_t index = 0; index < total; index++) mapping[index] = (uint8_t)(index * 37 + 11);
+    *(uint32_t *)(mapping + page_size) = 0xd503201fU;
+    *(uint32_t *)(mapping + page_size + 4) = 0xd65f03c0U;
+    *(uint32_t *)(mapping + 2 * page_size - 4) = 0xd503201fU;
+    *(uint32_t *)(mapping + 2 * page_size) = 0xd503201fU;
+    memcpy(expected, mapping, total);
+    __builtin___clear_cache((char *)mapping, (char *)mapping + total);
+    if (mprotect(mapping, total, PROT_READ | PROT_EXEC) ||
+        munmap(mapping + total, page_size)) goto out;
+
+    uint64_t address = (uintptr_t)(mapping + page_size);
+    if (ioctl(device, PTEBP_EMULATE_FILE_START, &address) < 0) goto out;
+    if (ioctl(device, PTEBP_EMULATE_FILE_CHECK) != 0) goto out;
+    if (mprotect(mapping + page_size, 2 * page_size, PROT_READ | PROT_WRITE | PROT_EXEC)) goto out;
+
+    for (int method = 0; method < 2; method++)
+    {
+        FILE *selected_stream = method ? stream : NULL;
+        for (offset = page_size; offset < 3 * page_size; offset++)
+        {
+            length = 1;
+            if (check_file_bytes(memory_fd, selected_stream, (uintptr_t)mapping,
+                                  expected, buffer, offset, length, 1)) goto out;
+            checks++;
+        }
+        offset = page_size - 1;
+        for (length = 0; length <= 2 * page_size + 1; length++)
+        {
+            if (check_file_bytes(memory_fd, selected_stream, (uintptr_t)mapping,
+                                  expected, buffer, offset, length, 1)) goto out;
+            checks++;
+        }
+        offset = 0;
+        length = total;
+        if (check_file_bytes(memory_fd, selected_stream, (uintptr_t)mapping,
+                              expected, buffer, offset, length, method ? 8 : 1)) goto out;
+        checks++;
+        for (offset = 0; offset < total; offset++)
+        {
+            if (buffer[offset + 1] != *(const volatile uint8_t *)(mapping + offset))
+            {
+                fprintf(stderr, "file_pointer_mismatch api=%s offset=%zu\n", method ? "fread" : "read", offset);
+                goto out;
+            }
+        }
+
+        ((void (*)(void))(uintptr_t)address)();
+        if (ioctl(device, PTEBP_EMULATE_FILE_CHECK) != method + 1) goto out;
+        printf("file_read_path=%s status=PASS single_bytes=%zu lengths=0..%zu\n",
+               method ? "fopen_fseek_fread" : "openat_lseek_read", 2 * page_size,
+               2 * page_size + 1);
+        fflush(stdout);
+    }
+
+    if (lseek(memory_fd, (off_t)((uintptr_t)mapping + total - 7), SEEK_SET) < 0 ||
+        read(memory_fd, buffer, 32) != 7 || memcmp(buffer, expected + total - 7, 7)) goto out;
+    if (fseek(stream, (long)((uintptr_t)mapping + total - 7), SEEK_SET) ||
+        fread(buffer, 1, 32, stream) != 7 || !ferror(stream) ||
+        memcmp(buffer, expected + total - 7, 7)) goto out;
+    clearerr(stream);
+    if (lseek(memory_fd, 0, SEEK_SET) != 0) goto out;
+    errno = 0;
+    if (read(memory_fd, buffer, 1) != -1 || errno != EIO) goto out;
+    if (fseek(stream, 0, SEEK_SET)) goto out;
+    errno = 0;
+    if (fread(buffer, 1, 1, stream) || !ferror(stream) || errno != EIO) goto out;
+    clearerr(stream);
+    struct iovec local_vecs[] = {
+        {.iov_base = buffer + 1, .iov_len = 1},
+        {.iov_base = NULL, .iov_len = 0},
+        {.iov_base = buffer + 2, .iov_len = page_size},
+        {.iov_base = buffer + page_size + 2, .iov_len = page_size},
+    };
+    struct iovec remote_vecs[] = {
+        {.iov_base = mapping + page_size - 1, .iov_len = 3},
+        {.iov_base = mapping + page_size + 2, .iov_len = page_size - 2},
+        {.iov_base = mapping + 2 * page_size, .iov_len = page_size},
+    };
+    if (process_vm_readv(getpid(), local_vecs, 4, remote_vecs, 3, 0) != (ssize_t)(2 * page_size + 1) ||
+        memcmp(buffer + 1, expected + page_size - 1, 2 * page_size + 1)) goto out;
+
+    local_vecs[0] = (struct iovec){.iov_base = buffer, .iov_len = 7};
+    local_vecs[1] = (struct iovec){.iov_base = NULL, .iov_len = 1};
+    remote_vecs[0] = (struct iovec){.iov_base = mapping + page_size, .iov_len = 8};
+    if (process_vm_readv(getpid(), local_vecs, 2, remote_vecs, 1, 0) != 7 ||
+        memcmp(buffer, expected + page_size, 7)) goto out;
+
+    local_vecs[0].iov_len = 8;
+    remote_vecs[0].iov_len = 7;
+    remote_vecs[1] = (struct iovec){.iov_base = NULL, .iov_len = 1};
+    if (process_vm_readv(getpid(), local_vecs, 1, remote_vecs, 2, 0) != 7 ||
+        memcmp(buffer, expected + page_size, 7)) goto out;
+    if (mprotect(mapping + page_size, page_size, PROT_NONE)) goto out;
+    errno = 0;
+    if (process_vm_readv(getpid(), local_vecs, 1, remote_vecs, 1, 0) != -1 || errno != EFAULT) goto out;
+    if (mprotect(mapping + page_size, page_size, PROT_READ | PROT_WRITE | PROT_EXEC)) goto out;
+
+    if (mprotect(mapping + page_size, 2 * page_size, PROT_READ | PROT_EXEC)) goto out;
+    if (ioctl(device, PTEBP_EMULATE_FILE_CHECK) != 2) goto out;
+    if (ioctl(device, PTEBP_EMULATE_RESET) < 0 || memcmp(mapping, expected, total)) goto out;
+
+    if (ioctl(device, PTEBP_EMULATE_FILE_START, &address) < 0 ||
+        check_file_bytes(memory_fd, NULL, (uintptr_t)mapping, expected, buffer, page_size, 1, 1) ||
+        check_file_bytes(memory_fd, stream, (uintptr_t)mapping, expected, buffer, page_size, 1, 1) ||
+        ioctl(device, PTEBP_EMULATE_FILE_CHECK) != 0 ||
+        ioctl(device, PTEBP_EMULATE_RESET) < 0 || memcmp(mapping, expected, total)) goto out;
+
+    if (mprotect(mapping + page_size, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) ||
+        ioctl(device, PTEBP_EMULATE_FILE_START, &address) < 0) goto out;
+    local_vecs[0] = (struct iovec){.iov_base = mapping + page_size + 128, .iov_len = 8};
+    remote_vecs[0] = (struct iovec){.iov_base = mapping + page_size, .iov_len = 8};
+    if (process_vm_readv(getpid(), local_vecs, 1, remote_vecs, 1, 0) != 8) goto out;
+    if (ioctl(device, PTEBP_EMULATE_FILE_CHECK) >= 0 ||
+        ioctl(device, PTEBP_EMULATE_RESET) < 0) goto out;
+    memcpy(expected + page_size + 128, expected + page_size, 8);
+    if (memcmp(mapping, expected, total)) goto out;
+    printf("ptebp process_vm test passed iovec=PASS partial=PASS permissions=PASS guarded_destination=PASS\n");
+
+    printf("ptebp file read test passed checks=%zu hits=2 restart=PASS short_read=PASS errors=PASS rwx=PASS pointer_view=PASS\n", checks);
+    fflush(stdout);
+    status = 0;
+out:
+    if (status) fprintf(stderr, "file_read_test=FAIL offset=%zu length=%zu errno=%d\n", offset, length, errno);
+    if (ioctl(device, PTEBP_EMULATE_RESET) < 0) status = -1;
+    if (stream) fclose(stream);
+    if (memory_fd >= 0) close(memory_fd);
+    if (mapping != MAP_FAILED) munmap(mapping, total + page_size);
+    free(buffer);
+    free(expected);
+    return status;
+}
+
 int main(int argc, char **argv)
 {
     uint32_t *instructions = NULL;
-    size_t count;
+    size_t count = 0;
     int device;
     size_t compared = 0;
     size_t skipped = 0;
@@ -483,11 +661,12 @@ int main(int argc, char **argv)
 
     if (argc != 3)
     {
-        fprintf(stderr, "usage: %s <instruction.txt> </dev/ptebp_emulate_test>\n",
+        fprintf(stderr, "usage: %s <instruction.txt|--file-read-only> </dev/ptebp_emulate_test>\n",
                 argv[0]);
         return 1;
     }
-    if (read_instructions(argv[1], &instructions, &count) < 0)
+    int file_read_only = strcmp(argv[1], "--file-read-only") == 0;
+    if (!file_read_only && read_instructions(argv[1], &instructions, &count) < 0)
         return 1;
     device = open(argv[2], O_RDWR | O_CLOEXEC);
     if (device < 0)
@@ -501,6 +680,12 @@ int main(int argc, char **argv)
     printf("runner_build_id=%s\n", runner_build_id);
     printf("instruction_count=%zu\n", count);
     fflush(stdout);
+    if (test_file_reads(device) < 0) goto out;
+    if (file_read_only)
+    {
+        exit_code = 0;
+        goto out;
+    }
     {
         struct sigaction action = { .sa_handler = runner_fatal_signal };
         sigemptyset(&action.sa_mask);

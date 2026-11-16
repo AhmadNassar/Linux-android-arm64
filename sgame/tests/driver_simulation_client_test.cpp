@@ -19,8 +19,6 @@ public:
         struct { unsigned char user_buffer[4096]; } vmemrw_info {};
         unsigned char vmem_info[SGAME_SIM_EXTRA_BYTES] {};
     } shared;
-    std::mutex request_lock;
-
     int legacy_read()
     {
         std::scoped_lock lock(request_lock);
@@ -31,7 +29,24 @@ public:
         __atomic_store_n(&shared.user, 0, __ATOMIC_RELAXED);
         return status;
     }
+private:
+    std::mutex request_lock;
 };
+
+namespace sgame::simulation::detail {
+struct FixtureRequestLock {
+    using Type = std::mutex FixtureDriver::*;
+    friend Type request_lock_member(FixtureRequestLock);
+};
+template struct RequestLockMember<FixtureRequestLock, &FixtureDriver::request_lock>;
+template<>
+struct RequestLock<FixtureDriver> {
+    static std::mutex &get(FixtureDriver &driver)
+    {
+        return driver.*request_lock_member(FixtureRequestLock{});
+    }
+};
+} // namespace sgame::simulation::detail
 
 class DispatchWorker {
 public:

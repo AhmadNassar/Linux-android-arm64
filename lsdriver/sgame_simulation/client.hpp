@@ -4,10 +4,23 @@
 #include <cerrno>
 #include <cstring>
 #include <mutex>
-#include <type_traits>
 #include "abi.h"
 
 namespace sgame::simulation {
+
+namespace detail {
+template<class LegacyDriver>
+struct RequestLock {
+    static auto &get(LegacyDriver &driver) { return driver.request_lock; }
+};
+
+/* Explicit member-pointer instantiation lets the upstream adapter share the
+ * author's private mutex without changing that class or relying on offsets. */
+template<class Tag, typename Tag::Type Member>
+struct RequestLockMember {
+    friend typename Tag::Type request_lock_member(Tag) { return Member; }
+};
+} // namespace detail
 
 /* Attach after the author's Driver has completed its normal handshake.
  * All legacy calls and extension calls share that Driver's request_lock.
@@ -49,8 +62,7 @@ private:
         static_assert(sizeof(shared_->vmemrw_info.user_buffer) >= sizeof(sgame_sim_packet));
         static_assert(sizeof(shared_->vmem_info) >= SGAME_SIM_EXTRA_BYTES);
         static_assert(sizeof(shared_->op) == sizeof(uint32_t));
-        using Lock = std::remove_reference_t<decltype(driver_.request_lock)>;
-        std::scoped_lock<Lock> lock(driver_.request_lock);
+        std::scoped_lock lock(detail::RequestLock<LegacyDriver>::get(driver_));
         const sgame_sim_header header { SGAME_SIM_ABI_VERSION, command, bytes, 0 };
         auto *buffer = reinterpret_cast<unsigned char *>(shared_->vmemrw_info.user_buffer);
 

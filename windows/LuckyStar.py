@@ -19,7 +19,6 @@ from http_bridge import (
     DEFAULT_ANDROID_PORT,
     DEFAULT_ANDROID_TIMEOUT_SECONDS,
     SCAN_HISTORY_MODES,
-    SCAN_MODE_ALIASES,
     SCAN_VALUE_MODES,
     build_saved_add_params,
     build_scan_params,
@@ -617,23 +616,7 @@ class HttpBridgeWindow(QWidget):
     @staticmethod
     def _normalize_scan_type_token(value: object) -> str | None:
         token = str(value or "").strip().lower()
-        return {
-            "i8": "i8",
-            "int8": "i8",
-            "i16": "i16",
-            "int16": "i16",
-            "i32": "i32",
-            "int32": "i32",
-            "i64": "i64",
-            "int64": "i64",
-            "float": "f32",
-            "f32": "f32",
-            "double": "f64",
-            "f64": "f64",
-            "str": "string",
-            "string": "string",
-            "text": "string",
-        }.get(token)
+        return token if token in {"i8", "i16", "i32", "i64", "f32", "f64", "string"} else None
 
     def _scan_result_type_token(self) -> str:
         return self.scan_session_type or self._selected_scan_type_token()
@@ -646,8 +629,7 @@ class HttpBridgeWindow(QWidget):
             self.scan_type_combo.setCurrentIndex(index)
 
     def _set_scan_mode_combo(self, mode_token: str) -> None:
-        normalized = SCAN_MODE_ALIASES.get(mode_token.strip().lower(), mode_token.strip().lower())
-        index = self.scan_mode_combo.findData(normalized)
+        index = self.scan_mode_combo.findData(mode_token.strip().lower())
         if index >= 0 and index != self.scan_mode_combo.currentIndex():
             self.scan_mode_combo.setCurrentIndex(index)
 
@@ -929,6 +911,14 @@ class HttpBridgeWindow(QWidget):
         self.ptebp_remove_button = QPushButton("移除PTEBP")
         self.ptebp_remove_button.clicked.connect(self.on_ptebp_remove_all)
         action_row.addWidget(self.ptebp_remove_button)
+
+        self.dptbp_set_button = QPushButton("设置DPTBP")
+        self.dptbp_set_button.clicked.connect(self.on_dptbp_set)
+        action_row.addWidget(self.dptbp_set_button)
+
+        self.dptbp_remove_button = QPushButton("移除DPTBP")
+        self.dptbp_remove_button.clicked.connect(self.on_dptbp_remove_all)
+        action_row.addWidget(self.dptbp_remove_button)
 
         self.stepbp_set_button = QPushButton("设置STEPBP")
         self.stepbp_set_button.clicked.connect(self.on_stepbp_set)
@@ -2237,6 +2227,10 @@ class HttpBridgeWindow(QWidget):
             self.ptebp_set_button.setEnabled(not active)
         if hasattr(self, "ptebp_remove_button"):
             self.ptebp_remove_button.setEnabled(self.breakpoint_mode == "ptebp")
+        if hasattr(self, "dptbp_set_button"):
+            self.dptbp_set_button.setEnabled(not active)
+        if hasattr(self, "dptbp_remove_button"):
+            self.dptbp_remove_button.setEnabled(self.breakpoint_mode == "dptbp")
         if hasattr(self, "stepbp_set_button"):
             self.stepbp_set_button.setEnabled(not active)
         if hasattr(self, "stepbp_remove_button"):
@@ -3621,6 +3615,12 @@ class HttpBridgeWindow(QWidget):
 
     def on_ptebp_remove_all(self) -> None:
         self._remove_breakpoint_mode("ptebp", "PTEBP")
+
+    def on_dptbp_set(self) -> None:
+        self._set_breakpoint_mode("dptbp", "DPTBP")
+
+    def on_dptbp_remove_all(self) -> None:
+        self._remove_breakpoint_mode("dptbp", "DPTBP")
 
     def on_stepbp_set(self) -> None:
         self._set_breakpoint_mode("stepbp", "STEPBP")

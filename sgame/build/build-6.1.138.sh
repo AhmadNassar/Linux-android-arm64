@@ -150,7 +150,8 @@ if f"sgame_read_mode={source['layer']['read_mode']['name']}" not in metadata or 
         f"sgame_simulation_source=enkernel-{simulation['commit']}" not in metadata:
     raise SystemExit("module has wrong simulation extension metadata")
 for expected in ('sgame_core=author-features-group-poll', 'sgame_network_probe=disabled',
-                 'sgame_features=module-hide,thread-hide,client-hide,kgsl-hide,proc-block,exit-hooks,cpu-render'):
+                 'sgame_features=module-hide,thread-hide,client-hide,kgsl-hide,proc-block,exit-hooks',
+                 'sgame_cpu_render=disabled-upstream'):
     if expected not in metadata:
         raise SystemExit('Missing restored feature metadata: ' + expected)
 (artifacts / "module-info.txt").write_text(metadata)

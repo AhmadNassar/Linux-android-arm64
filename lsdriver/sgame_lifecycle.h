@@ -3,11 +3,11 @@
 #define SGAME_LIFECYCLE_H
 
 MODULE_INFO(sgame_core, "author-features-group-poll");
-MODULE_INFO(sgame_features, "module-hide,thread-hide,client-hide,kgsl-hide,proc-block,exit-hooks,cpu-render");
+MODULE_INFO(sgame_features, "module-hide,thread-hide,client-hide,kgsl-hide,proc-block,exit-hooks");
 MODULE_INFO(sgame_network_probe, "disabled");
+MODULE_INFO(sgame_cpu_render, "disabled-upstream");
 
-static bool sgame_physical_ready, sgame_cpu_ready;
-static struct task_struct *volatile sgame_render_thread;
+static bool sgame_physical_ready;
 
 static void sgame_stop_thread(struct task_struct *volatile *thread)
 {
@@ -23,12 +23,7 @@ static void sgame_core_exit(void)
     WRITE_ONCE(sgame_stop_requested, true);
     sgame_stop_thread(&connect_thread_task);
     sgame_stop_thread(&dispatch_thread_task);
-    sgame_stop_thread(&sgame_render_thread);
     sgame_cleanup_client();
-    if (sgame_cpu_ready) {
-        cpu_render_exit();
-        sgame_cpu_ready = false;
-    }
     inline_hook_remove_all();
     if (sgame_physical_ready) {
         free_physical_page_info();
@@ -71,34 +66,21 @@ static int sgame_core_init(int (*connect_fn)(void *), int (*dispatch_fn)(void *)
     get_task_struct(dispatch_thread_task);
     stage = "hide-connect-thread";
     status = hide_task_install(connect_thread_task->pid);
-    if (status < 0) goto fail;
+    if (status < 0)
+        ls_log_always_tag("core", "隐藏连接线程失败，错误码: %d\n", status);
     stage = "hide-dispatch-thread";
     status = hide_task_install(dispatch_thread_task->pid);
-    if (status < 0) goto fail;
+    if (status < 0)
+        ls_log_always_tag("core", "隐藏调度线程失败，错误码: %d\n", status);
     stage = "exit-hooks";
     status = do_exit_init();
     if (status < 0) goto fail;
 
-    /* Retain upstream CPU rendering and its five-second demonstration. An
-     * unsupported renderer is reported without failing the memory service. */
-    status = cpu_render_init();
-    if (status < 0) {
-        ls_log_always_tag("core", "CPU renderer unavailable: %d\n", status);
-    } else {
-        sgame_cpu_ready = true;
-        sgame_render_thread = kthread_create(CpuRenderTestThreadFunction, NULL, "ls-cpu-render");
-        if (IS_ERR(sgame_render_thread)) {
-            ls_log_always_tag("core", "CPU demo thread unavailable: %ld\n", PTR_ERR(sgame_render_thread));
-            sgame_render_thread = NULL;
-        } else {
-            get_task_struct(sgame_render_thread);
-        }
-    }
+    /* CPU rendering remains disconnected, matching upstream's lifecycle. */
     sched_set_fifo_low(connect_thread_task);
     sched_set_fifo(dispatch_thread_task);
     wake_up_process(connect_thread_task);
     wake_up_process(dispatch_thread_task);
-    if (sgame_render_thread) wake_up_process(sgame_render_thread);
 
     /* Do not hide until all required initialization succeeds: the kernel must
      * retain normal sysfs rollback on any preceding error. */

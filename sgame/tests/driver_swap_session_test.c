@@ -109,7 +109,7 @@ static void v_gnss_destroy(void) {}
 static void v_gyro_destroy(void) {}
 static void remove_process_hwbp(void) {}
 static void remove_process_ptebp(void) {}
-static void remove_process_dptdbg(void) {}
+static void remove_process_dptbp(void) {}
 static void remove_process_stepbp(void) {}
 static void syscall_monitor_remove_all(void) { memset(g_syscall_monitor_pids, 0, sizeof(g_syscall_monitor_pids)); }
 static void cntvct_monitor_remove_all(void) { g_cntvct_monitor_tgid = 0; }

@@ -52,7 +52,8 @@ def export(output, read_mode='cached', revision='HEAD'):
         'layer': {'version': version, 'sha256': sha('lsdriver/sgame_swap_read.h'),
                   'read_mode': {'name': read_mode, 'make_variable': 'SGAME_READ_NC', 'make_value': int(read_mode == 'nc')},
                   'simulation': {'version': simulation['version'], 'commit': simulation['commit']},
-                  'features': ['module-hide', 'thread-hide', 'client-hide', 'kgsl-hide', 'proc-block', 'exit-hooks', 'cpu-render'],
+                  'features': ['module-hide', 'thread-hide', 'client-hide', 'kgsl-hide', 'proc-block', 'exit-hooks'],
+                  'cpu_render': 'disabled-upstream',
                   'network_probe': False},
     }
     (output / 'sgame-source.json').write_text(json.dumps(source, indent=2) + '\n')

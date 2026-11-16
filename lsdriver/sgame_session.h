@@ -43,7 +43,7 @@ static void sgame_release_client(void)
         v_gyro_destroy();
         remove_process_hwbp();
         remove_process_ptebp();
-        remove_process_dptdbg();
+        remove_process_dptbp();
         remove_process_stepbp();
         syscall_monitor_remove_all();
         cntvct_monitor_remove_all();

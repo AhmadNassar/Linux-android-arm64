@@ -1,7 +1,5 @@
 /* Compile with the real, unchanged author header and Android NDK. */
-#include "logger/logger.h"
-#include "driver/driver.h"
-#include "../../lsdriver/sgame_simulation/client.hpp"
+#include "../../lsdriver/sgame_simulation/upstream_client.hpp"
 #include <cstddef>
 
 static_assert(sizeof(sgame_sim_header) == 16);

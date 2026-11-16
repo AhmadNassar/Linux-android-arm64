@@ -17,8 +17,11 @@ session = code('lsdriver/sgame_session.h')
 init = code('lsdriver/sgame_lifecycle.h')
 assert not re.search(r'\bipv4_ping\w*\s*\(', main + init)
 assert not re.search(r'^\s*#if\s+0\b', main + init + session, re.M)
-for name in ('hide_myself', 'proc_create_block_init', 'do_exit_init', 'bypass_cfi', 'cpu_render_init'):
+for name in ('hide_myself', 'proc_create_block_init', 'do_exit_init', 'bypass_cfi'):
     assert re.search(r'\b' + name + r'\s*\(', init), name
+assert not re.search(r'\bcpu_render_(?:init|exit)\s*\(', main + init)
+assert 'CpuRenderTestThreadFunction' not in main + init
+assert 'MODULE_INFO(sgame_cpu_render, "disabled-upstream")' in init
 for name in ('hide_task_install', 'hide_kgsl_install', 'hide_task_remove', 'hide_kgsl_remove'):
     assert re.search(r'\b' + name + r'\s*\(', session), name
 assert init.index('do_exit_init()') < init.index('hide_myself()')
@@ -41,4 +44,4 @@ for name in ('build-read-matrix.sh', 'build-5.10.sh', 'build_5_10.py', '5.10-bas
              'verify_gki_module.py', 'verify_pac_scs.py', 'kernel-baselines.json',
              '6.12.23-manifest.xml', '6.12.58-manifest.xml'):
     assert (ROOT/'sgame/build'/name).is_file(), name
-print('PASS: author interfaces/native PTE implementation and all feature flows retained; network probe disabled; committed-source builds')
+print('PASS: author interfaces/native PTE and project extensions retained; upstream CPU rendering paused; network probe disabled; committed-source builds')

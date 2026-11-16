@@ -35,8 +35,20 @@ def export(output, read_mode='cached', revision='HEAD'):
         raise SystemExit('Committed driver source lacks required build inputs: ' + ', '.join(missing))
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    payload = git('archive', '--format=tar', commit, '--', *paths)
-    subprocess.run(['tar', '-xf', '-', '-C', str(output)], input=payload, check=True)
+    # Read only the selected committed blobs. git archive can prefetch unrelated
+    # large dump objects from a partial clone before applying its path filter.
+    entries = git('ls-tree', '-rz', commit, '--', *paths).split(b'\0')
+    for entry in entries:
+        if not entry:
+            continue
+        metadata, encoded_name = entry.split(b'\t', 1)
+        mode, kind, object_id = metadata.decode().split()
+        if kind != 'blob' or mode not in ('100644', '100755'):
+            raise SystemExit('Unsupported committed build input: ' + encoded_name.decode())
+        destination = output / encoded_name.decode()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(git('cat-file', 'blob', object_id))
+        destination.chmod(0o755 if mode == '100755' else 0o644)
     def sha(path):
         return hashlib.sha256((output / path).read_bytes()).hexdigest()
     protocol = ['android/jni/driver/driver.h', 'android/jni/driver/driver_loader.h',

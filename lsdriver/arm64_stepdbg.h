@@ -3,6 +3,7 @@
 
 #include <linux/atomic.h>
 #include <linux/errno.h>
+#include <linux/hashtable.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/mutex.h>
@@ -10,6 +11,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/task_stack.h>
 #include <linux/smp.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/thread_info.h>
 #include <linux/wait.h>
@@ -31,6 +33,56 @@ static struct list_head *g_stepbp_native_hooks;
 static void (*g_stepbp_register_hook)(struct step_hook *hook);
 static void (*g_stepbp_unregister_hook)(struct step_hook *hook);
 static bool g_stepbp_hook_registered;
+
+struct stepbp_task_step
+{
+    struct hlist_node node;
+    pid_t tid;
+    u64 start_time;
+    unsigned long generation;
+    unsigned long pc;
+    bool valid;
+};
+static DEFINE_HASHTABLE(g_stepbp_task_steps, 8);
+
+/* An interrupt can return to active-pending step state without executing an
+ * instruction, producing an ISV=0 trap at the PC already delivered. Track every
+ * thread's previous step, so only that replay is skipped. ISV=1 self branches
+ * and first arrivals after an instruction with no syndrome still count. */
+static bool stepbp_replayed_pc_locked(struct pt_regs *regs, unsigned long esr, int native_result)
+{
+    struct stepbp_task_step *state;
+    bool replay;
+
+    hash_for_each_possible(g_stepbp_task_steps, state, node, (unsigned long)current->pid)
+    {
+        if (state->tid == current->pid) goto found;
+    }
+    state = kzalloc(sizeof(*state), GFP_ATOMIC);
+    if (!state) return false;
+    state->tid = current->pid;
+    hash_add(g_stepbp_task_steps, &state->node, (unsigned long)state->tid);
+found:
+    replay = state->valid && state->start_time == current->start_time && state->generation == g_stepbp_generation && state->pc == regs->pc && !(esr & BIT(24));
+    state->start_time = current->start_time;
+    state->generation = g_stepbp_generation;
+    state->pc = regs->pc;
+    state->valid = native_result != DBG_HOOK_HANDLED;
+    return replay;
+}
+
+static void stepbp_free_task_steps(void)
+{
+    struct stepbp_task_step *state;
+    struct hlist_node *next;
+    unsigned int bucket;
+
+    hash_for_each_safe(g_stepbp_task_steps, bucket, next, state, node)
+    {
+        hash_del(&state->node);
+        kfree(state);
+    }
+}
 
 static atomic_t g_stepbp_returns_inflight = ATOMIC_INIT(0);
 static DECLARE_WAIT_QUEUE_HEAD(g_stepbp_return_wait);
@@ -250,7 +302,7 @@ static int work_trampoline_stepbp_switch(struct pt_regs *hook_regs)
     return 0;
 }
 
-static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int native_result, struct stepbp_return_frame *frame)
+static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int native_result, struct stepbp_return_frame *frame, unsigned long esr)
 {
     int result = native_result;
     unsigned long flags;
@@ -271,9 +323,10 @@ static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int 
         info = g_stepbp_info;
         stopping = g_stepbp_stopping;
         target_task = stopping ? bp_info_targets_task(info, current) : !!bp_info_find_type_for_task(info, BP_BREAKPOINT_X, current);
-        if (target_task && !stopping && native_result != DBG_HOOK_HANDLED)
+        if (target_task && !stopping)
         {
-            hit_point = bp_info_find_point_by_pc_for_task(info, regs->pc, current);
+            bool replay = stepbp_replayed_pc_locked(regs, esr, native_result);
+            if (!replay && native_result != DBG_HOOK_HANDLED) hit_point = bp_info_find_point_by_pc_for_task(info, regs->pc, current);
             if (hit_point)
             {
                 hit_callback = READ_ONCE(hit_point->on_hit);
@@ -350,7 +403,7 @@ static int stepbp_user_single_step(struct pt_regs *regs, unsigned long esr)
         native_result = hook->fn(regs, esr);
         if (native_result == DBG_HOOK_HANDLED) break;
     }
-    return stepbp_finish_call_step_hook(native_result, &frame);
+    return stepbp_finish_call_step_hook(native_result, &frame, esr);
 }
 
 static struct hook_entry g_stepbp_required_hooks[] = {
@@ -430,6 +483,7 @@ static void stepbp_stop_monitor_locked(void)
     inline_hook_remove_count(g_stepbp_switch_hook, sizeof(g_stepbp_switch_hook) / sizeof(g_stepbp_switch_hook[0]));
     stepbp_remove_required_hooks();
     wait_event(g_stepbp_return_wait, atomic_read(&g_stepbp_returns_inflight) == 0);
+    stepbp_free_task_steps();
 
     spin_lock_irqsave(&g_stepbp_lock, flags);
     stepbp_publish_monitor(NULL, false);

@@ -36,7 +36,7 @@
 #include "virtual_memory_enum.h"
 #include "break_point.h"
 #include "network/ipv4_ping.h"
-#include "kernel_render/cpu/cpu_render.h"
+//#include "kernel_render/cpu/cpu_render.h"
 
 static struct request_obj *req = NULL;
 
@@ -52,42 +52,38 @@ struct task_struct *volatile connect_thread_task = 0;
 struct task_struct *volatile dispatch_thread_task = 0;
 struct task_struct *volatile ls_process_task = 0;
 
-static int CpuRenderTestThreadFunction(void *data)
-{
-    unsigned long deadline = jiffies + 5 * HZ;
-    bool frame_open;
-    int ret;
+// static int CpuRenderTestThreadFunction(void *data)
+// {
+//     unsigned long deadline = jiffies + 5 * HZ;
+//     bool frame_open;
+//     int ret;
 
-    (void)data;
-    while (!kthread_should_stop() && time_before(jiffies, deadline))
-    {
-        frame_open = false;
-        ret = cpu_render_begin_frame();
-        if (!ret) frame_open = true;
-        if (!ret) ret = cpu_render_clear(0xff101820U);
-        if (!ret) ret = cpu_render_line(20, 80, 360, 360, 0xffff453aU, 6);
-        if (!ret) ret = cpu_render_rect(40, 120, 280, 300, 0xff30d5c8U, 4, false);
-        if (!ret) ret = cpu_render_rect(80, 160, 180, 240, 0xffffd60aU, 2, true);
-        if (!ret) ret = cpu_render_circle(320, 320, 120, 0xff64d2ffU, 6, false);
-        if (!ret) ret = cpu_render_circle(480, 420, 50, 0xffff375fU, 2, true);
-        if (!ret) ret = cpu_render_text(48, 520, "LSDRIVER", 4, 0xffffffffU);
-        if (frame_open)
-        {
-            int end_ret = cpu_render_end_frame();
+//     (void)data;
+//     while (!kthread_should_stop() && time_before(jiffies, deadline))
+//     {
+//         frame_open = false;
+//         ret = cpu_render_begin_frame();
+//         if (!ret) frame_open = true;
+//         if (!ret) ret = cpu_render_clear(0xff101820U);
+//         if (!ret) ret = cpu_render_text(224, 160, "LSDRIVER", 4, 0xffffffffU);
+//         if (!ret) ret = cpu_render_rect(140, 220, 500, 420, 0xff00ff00U, 0, true);
+//         if (frame_open)
+//         {
+//             int end_ret = cpu_render_end_frame();
 
-            frame_open = false;
-            if (!ret) ret = end_ret;
-        }
-        if (ret)
-        {
-            ls_log_always_tag("cpu_render", "测试绘制失败，错误码: %d\n", ret);
-            break;
-        }
+//             frame_open = false;
+//             if (!ret) ret = end_ret;
+//         }
+//         if (ret)
+//         {
+//             ls_log_always_tag("cpu_render", "测试绘制失败，错误码: %d\n", ret);
+//             break;
+//         }
 
-        usleep_range(8000, 8500);
-    }
-    return 0;
-}
+//         usleep_range(8000, 8500);
+//     }
+//     return 0;
+// }
 
 static int DispatchThreadFunction(void *data)
 {
@@ -166,11 +162,11 @@ static int DispatchThreadFunction(void *data)
                 case request_op_stepbp_remove:
                     remove_process_stepbp();
                     break;
-                case request_op_dptdbg_set:
-                    __atomic_store_n(&req->status, set_process_dptdbg(&req->bp_info), __ATOMIC_RELAXED);
+                case request_op_dptbp_set:
+                    __atomic_store_n(&req->status, set_process_dptbp(&req->bp_info), __ATOMIC_RELAXED);
                     break;
-                case request_op_dptdbg_remove:
-                    remove_process_dptdbg();
+                case request_op_dptbp_remove:
+                    remove_process_dptbp();
                     break;
                 case request_op_syscall_monitor_set:
                     __atomic_store_n(&req->status, syscall_monitor_install(req->tgid), __ATOMIC_RELAXED);
@@ -347,7 +343,7 @@ static inline unsigned long exit_strip_kernel_pac(unsigned long address)
 static const char *exit_watch_process_name(const char *comm)
 {
     static const char *const process_names[] = {
-        "LS", "system_server", "surfaceflinger", "com.tencent.tmgp.dfm", "com.tencent.tmgp.sgame", "com.pi.czrxdfirst", "com.bwxrk.yqmy.gz", "me.hd.ggtutorial",
+        "LS", "com.tencent.tmgp.dfm", "com.tencent.tmgp.sgame", "com.pi.czrxdfirst", "com.bwxrk.yqmy.gz", "me.hd.ggtutorial",
     };
 
     for (int i = 0; i < ARRAY_SIZE(process_names); i++)
@@ -592,7 +588,7 @@ static int taskstats_exit_hook_work(struct pt_regs *regs)
         v_gyro_destroy();                 // 清理陀螺仪
         remove_process_hwbp();            // 清理硬件断点
         remove_process_ptebp();           // 清理 PTEBP
-        remove_process_dptdbg();          // 清理 DPTDBG
+        remove_process_dptbp();           // 清理 DPTBP
         remove_process_stepbp();          // 清理单步断点
         syscall_monitor_remove_all();     // 清理全部系统调用监控目标
         cntvct_monitor_remove_all();      // 清理全部 CNTVCT_EL0 读取监控
@@ -600,7 +596,7 @@ static int taskstats_exit_hook_work(struct pt_regs *regs)
         ls_process_task = NULL;           // 标记用户进程已断开
         if (!connect_thread_task && !dispatch_thread_task)
         {
-            cpu_render_exit();
+            //cpu_render_exit();
             inline_hook_remove_all(); // 内核退出才清理所有hook
         }
     }
@@ -790,18 +786,16 @@ static int __init lsdriver_init(void)
         ls_log_always_tag("core", "唤醒调度线程失败，错误码: %d\n", status);
         goto fail;
     }
-    // 隐藏内核线程
+    // 隐藏内核线程(无关紧要，失败继续运行，原因是skroot 冲突hook filldir64)
     status = hide_task_install(connect_thread_task->pid);
     if (status < 0)
     {
         ls_log_always_tag("core", "隐藏连接线程失败，错误码: %d\n", status);
-        goto fail;
     }
     status = hide_task_install(dispatch_thread_task->pid);
     if (status < 0)
     {
         ls_log_always_tag("core", "隐藏调度线程失败，错误码: %d\n", status);
-        goto fail;
     }
 
     // 注册用户进程退出回调
@@ -811,23 +805,24 @@ static int __init lsdriver_init(void)
         ls_log_always_tag("core", "注册 taskstats_exit 清理 hook 失败，错误码: %d\n", status);
         goto fail;
     }
-    //初始化cpu渲染相关资源
-    status = cpu_render_init();
-    if (status < 0)
-    {
-        ls_log_always_tag("core", "初始化 Qualcomm/MediaTek CPU 渲染统一抽象失败，错误码: %d\n", status);
-        status = 0; //失败无关紧要，继续运行
-    }
-    else
-    {
-        struct task_struct *render_task = kthread_run(CpuRenderTestThreadFunction, NULL, "ls-cpu-render");
-        if (IS_ERR(render_task))
-        {
-            status = PTR_ERR(render_task);
-            ls_log_always_tag("core", "创建 CPU 渲染测试线程失败，错误码: %d\n", status);
-            status = 0;
-        }
-    }
+
+    // //初始化cpu渲染相关资源
+    // status = cpu_render_init();
+    // if (status < 0)
+    // {
+    //     ls_log_always_tag("core", "初始化 Qualcomm/MediaTek CPU 渲染统一抽象失败，错误码: %d\n", status);
+    //     status = 0; //失败无关紧要，继续运行
+    // }
+    // else
+    // {
+    //     struct task_struct *render_task = kthread_run(CpuRenderTestThreadFunction, NULL, "ls-cpu-render");
+    //     if (IS_ERR(render_task))
+    //     {
+    //         status = PTR_ERR(render_task);
+    //         ls_log_always_tag("core", "创建 CPU 渲染测试线程失败，错误码: %d\n", status);
+    //         status = 0;
+    //     }
+    // }
 
     /*
     隐藏内核模块本身必须放在所有初始化完成后运行。
@@ -850,7 +845,7 @@ fail:
     if (dispatch_thread_task) hide_task_remove(dispatch_thread_task->pid);
     connect_thread_task = NULL;
     dispatch_thread_task = NULL;
-    cpu_render_exit();
+    //cpu_render_exit();
     inline_hook_remove_all(); //这个作用也不大,模块初始化失败内核会直接回收ko所有内存(.text回收)，这里就算hook卸载了，但是控制流在中途的hook work代码段被回收了要panic
     free_physical_page_info();
     return status;
@@ -926,6 +921,8 @@ MODULE_VERSION(LSDRIVER_VERSION);
 	内核死机日志是有的，常规的标准路径/sys/fs/pstore没有，不同的厂商有不同的转储路径
 	adb shell su -c 'getprop | grep -iE "boot.reason|bootreason|panic|ramdump|pstore|reboot"'
 	这个命令即可看到厂商的ramdump是启用的
+    
+    !!!!!!也可通过当前项目的panic_reserve_dump程序直接导出厂商设备崩溃转储日志,转储路径为/storage/emulated/0/dump整个文件夹!!!!!!
 KMI:
     Kernel Module Interface，内核模块接口，独有的Android GKI 概念
     GKI 核心内核镜像由 Google 统一发布；各个厂商的硬件驱动编译成独立.ko模块，只能调用 KMI 符号列表内导出的函数 / 全局变量。

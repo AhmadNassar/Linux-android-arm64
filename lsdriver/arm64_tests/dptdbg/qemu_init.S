@@ -11,14 +11,24 @@
 .equ __NR_mprotect, 226
 .equ __NR_write, 64
 .equ __NR_exit, 93
+.equ __NR_exit_group, 94
+.equ __NR_futex, 98
+.equ __NR_clone, 220
 .equ __NR_delete_module, 106
 .equ __NR_reboot, 142
+.equ __NR_getpid, 172
 .equ __NR_finit_module, 273
 .equ LINUX_REBOOT_MAGIC1, 0xfee1dead
 .equ LINUX_REBOOT_MAGIC2, 0x28121969
 .equ LINUX_REBOOT_CMD_POWER_OFF, 0x4321fedc
 
 _start:
+    mov x22, #1
+    mov x23, #0
+    mov x8, #__NR_getpid
+    svc #0
+    cmp x0, #1
+    cset x24, eq
     bl open_console
 
     adrp x1, message_begin
@@ -31,14 +41,70 @@ _start:
 
     bl load_module
     cbnz x0, module_load_failed
+    mov x23, #1
 
     adrp x1, message_load_ok
     add x1, x1, :lo12:message_load_ok
     mov x2, #message_load_ok_len
     bl write_message
 
+    mov x25, #0x40000000
+    add x26, x25, #0x2000
+protect_test_pages:
+    mov x0, x25
+    mov x1, #0x1000
+    mov x2, #7
+    mov x8, #__NR_mprotect
+    svc #0
+    cbnz x0, test_function_failed
+    mov x0, x25
+    mov x1, #0x1000
+    mov x2, #5
+    mov x8, #__NR_mprotect
+    svc #0
+    cbnz x0, test_function_failed
+    add x25, x25, #0x1000
+    cmp x25, x26
+    b.lo protect_test_pages
+
+    bl run_worker_thread
+    cbnz x0, test_function_failed
+
+    mov x15, #0
+    movi v8.16b, #0
+    movi v31.16b, #0
+    msr fpcr, xzr
+    msr fpsr, xzr
     bl run_test_function
     cbnz x0, test_function_failed
+
+    mov x9, #0x1234
+    cmp x15, x9
+    b.ne test_function_failed
+    sub sp, sp, #32
+    stp q8, q31, [sp]
+    ldp x9, x10, [sp]
+    ldp x11, x12, [sp, #16]
+    add sp, sp, #32
+    adrp x13, expected_fp
+    add x13, x13, :lo12:expected_fp
+    ldp x14, x15, [x13]
+    cmp x9, x14
+    b.ne test_function_failed
+    cmp x10, x15
+    b.ne test_function_failed
+    ldp x14, x15, [x13, #16]
+    cmp x11, x14
+    b.ne test_function_failed
+    cmp x12, x15
+    b.ne test_function_failed
+    mrs x9, fpcr
+    mov x10, #0x00400000
+    cmp x9, x10
+    b.ne test_function_failed
+    mrs x9, fpsr
+    cmp x9, #1
+    b.ne test_function_failed
 
     adrp x1, message_result_ok
     add x1, x1, :lo12:message_result_ok
@@ -47,6 +113,7 @@ _start:
 
     bl unload_module
     cbnz x0, module_unload_failed
+    mov x23, #0
 
     adrp x1, message_unload_ok
     add x1, x1, :lo12:message_unload_ok
@@ -57,37 +124,42 @@ _start:
     add x1, x1, :lo12:message_pass
     mov x2, #message_pass_len
     bl write_message
-    b power_off
+    mov x22, #0
+    b test_exit
 
 test_page_failed:
     adrp x1, message_page_failed
     add x1, x1, :lo12:message_page_failed
     mov x2, #message_page_failed_len
     bl write_message
-    b power_off
+    b test_exit
 
 module_load_failed:
     adrp x1, message_load_failed
     add x1, x1, :lo12:message_load_failed
     mov x2, #message_load_failed_len
     bl write_message
-    b power_off
+    b test_exit
 
 module_unload_failed:
     adrp x1, message_unload_failed
     add x1, x1, :lo12:message_unload_failed
     mov x2, #message_unload_failed_len
     bl write_message
-    b power_off
+    b test_exit
 
 test_function_failed:
     adrp x1, message_result_failed
     add x1, x1, :lo12:message_result_failed
     mov x2, #message_result_failed_len
     bl write_message
-    b power_off
+    b test_exit
 
 open_console:
+    cbnz x24, open_init_console
+    mov x19, #1
+    ret
+open_init_console:
     mov x0, #AT_FDCWD
     adrp x1, console_path
     add x1, x1, :lo12:console_path
@@ -110,7 +182,7 @@ write_message:
 
 map_test_page:
     mov x0, #0x40000000
-    mov x1, #0x1000
+    mov x1, #0x2000
     mov x2, #7
     mov x3, #0x32
     mov x4, #-1
@@ -127,14 +199,19 @@ map_test_page:
     movz w6, #0x03c0
     movk w6, #0xd65f, lsl #16
     str w6, [x0, #4]
+    str xzr, [x0, #0x1000]
 
     mov x0, #0x40000000
-    mov x1, #0x1000
+    mov x1, #0x2000
     mov x2, #5
     mov x8, #__NR_mprotect
     svc #0
     cmp x0, #0
     b.lt map_failed
+    adrp x6, worker_tid
+    add x6, x6, :lo12:worker_tid
+    mov w7, #1
+    str w7, [x6]
     mov x0, #0
     ret
 
@@ -160,6 +237,46 @@ run_test_function_loop:
 test_function_result_failed:
     mov x0, #1
     ret
+
+run_worker_thread:
+    movz x0, #0x0f00
+    movk x0, #0x21, lsl #16
+    adrp x1, worker_stack_top
+    add x1, x1, :lo12:worker_stack_top
+    mov x2, #0
+    mov x3, #0
+    adrp x4, worker_tid
+    add x4, x4, :lo12:worker_tid
+    mov x8, #__NR_clone
+    svc #0
+    cmp x0, #0
+    b.lt test_function_result_failed
+    b.eq worker_entry
+worker_wait:
+    adrp x0, worker_tid
+    add x0, x0, :lo12:worker_tid
+    ldar w2, [x0]
+    cbz w2, worker_complete
+    mov x1, #0
+    mov x3, #0
+    mov x4, #0
+    mov x5, #0
+    mov x8, #__NR_futex
+    svc #0
+    b worker_wait
+worker_complete:
+    adrp x0, worker_result
+    add x0, x0, :lo12:worker_result
+    ldar w0, [x0]
+    ret
+worker_entry:
+    bl run_test_function
+    adrp x1, worker_result
+    add x1, x1, :lo12:worker_result
+    stlr w0, [x1]
+    mov x8, #__NR_exit
+    svc #0
+    b .
 
 load_module:
     mov x0, #AT_FDCWD
@@ -208,6 +325,15 @@ unload_failed:
     mov x0, #1
     ret
 
+test_exit:
+    cbz x23, finish_process
+    bl unload_module
+finish_process:
+    cbnz x24, power_off
+    mov x0, x22
+    mov x8, #__NR_exit_group
+    svc #0
+    b .
 power_off:
     movz x0, #0xdead
     movk x0, #0xfee1, lsl #16
@@ -225,10 +351,13 @@ power_off:
 
 .section .rodata
 .align 3
+expected_fp:
+    .quad 0x1122334455667788, 0x99aabbccddeeff00
+    .quad 0xfedcba9876543210, 0x0123456789abcdef
 console_path:
     .asciz "/dev/console"
 module_path:
-    .asciz "/arm64_dptdbg_test_module.ko"
+    .asciz "./arm64_dptdbg_test_module.ko"
 module_name:
     .asciz "arm64_dptdbg_test_module"
 empty_params:
@@ -260,3 +389,14 @@ message_unload_failed:
 message_pass:
     .ascii "DPTDBG_TEST_PASS\n"
 .equ message_pass_len, . - message_pass
+
+.section .bss
+.balign 16
+worker_tid:
+    .skip 4
+worker_result:
+    .skip 4
+.balign 16
+worker_stack:
+    .skip 65536
+worker_stack_top:

@@ -27,6 +27,10 @@ static DEFINE_SPINLOCK(g_stepbp_hit_lock);
 static DEFINE_MUTEX(g_stepbp_mutex);
 static bool g_stepbp_stopping;
 static unsigned long g_stepbp_generation;
+static struct list_head *g_stepbp_native_hooks;
+static void (*g_stepbp_register_hook)(struct step_hook *hook);
+static void (*g_stepbp_unregister_hook)(struct step_hook *hook);
+static bool g_stepbp_hook_registered;
 
 static atomic_t g_stepbp_returns_inflight = ATOMIC_INIT(0);
 static DECLARE_WAIT_QUEUE_HEAD(g_stepbp_return_wait);
@@ -246,15 +250,6 @@ static int work_trampoline_stepbp_switch(struct pt_regs *hook_regs)
     return 0;
 }
 
-static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int native_result, struct stepbp_return_frame *frame);
-__attribute__((naked, used)) void ret_trampoline_stepbp_call_step_hook(void)
-{
-    asm volatile("mov x1, sp\n"
-                 "bl stepbp_finish_call_step_hook\n"
-                 "ldp x16, xzr, [sp], #304\n"
-                 "ret x16\n");
-}
-
 static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int native_result, struct stepbp_return_frame *frame)
 {
     int result = native_result;
@@ -316,23 +311,22 @@ static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int 
     return result;
 }
 
-// call_step_hook 入口只安装返回后处理；原生 uprobe/perf step hook 先完整执行。
-static int work_trampoline_stepbp_single_step(struct pt_regs *hook_regs)
+static struct step_hook g_stepbp_user_hook;
+
+/* The compiler can inline call_step_hook into single_step_handler. Register a
+ * native hook so both the inlined and out-of-line dispatch paths reach us.
+ * Preserve the remaining native hooks before recording our own step. */
+static int stepbp_user_single_step(struct pt_regs *regs, unsigned long esr)
 {
     unsigned long flags;
     unsigned long generation;
     bool target_task;
-    struct stepbp_return_frame *frame;
-    struct pt_regs *regs;
+    struct stepbp_return_frame frame;
     struct break_point *info;
+    struct step_hook *hook = &g_stepbp_user_hook;
+    int native_result = DBG_HOOK_ERROR;
 
-    if (!hook_regs) return 0;
-
-    regs = (struct pt_regs *)hook_regs->regs[0];
-    if (!regs) return 0;
-
-    // user_mode() 判断异常现场是否来自 EL0；STEPBP 只接管用户态单步，不碰 EL1 内核态异常。
-    if (!user_mode(regs)) return 0;
+    if (!regs || !user_mode(regs)) return DBG_HOOK_ERROR;
 
     spin_lock_irqsave(&g_stepbp_lock, flags);
     info = g_stepbp_info;
@@ -340,20 +334,23 @@ static int work_trampoline_stepbp_single_step(struct pt_regs *hook_regs)
     generation = g_stepbp_generation;
     if (target_task)
     {
-        frame = hook_frame_metadata(hook_regs);
-        frame->return_addr = hook_regs->regs[30];
-        frame->generation = generation;
-        frame->regs = regs;
+        frame.return_addr = 0;
+        frame.generation = generation;
+        frame.regs = regs;
         atomic_inc(&g_stepbp_returns_inflight);
-        hook_regs->sp = (unsigned long)frame;
-        hook_regs->regs[30] = (unsigned long)ret_trampoline_stepbp_call_step_hook;
     }
     spin_unlock_irqrestore(&g_stepbp_lock, flags);
-    return 0;
+    if (!target_task) return DBG_HOOK_ERROR;
+
+    list_for_each_entry_continue_rcu(hook, g_stepbp_native_hooks, node)
+    {
+        native_result = hook->fn(regs, esr);
+        if (native_result == DBG_HOOK_HANDLED) break;
+    }
+    return stepbp_finish_call_step_hook(native_result, &frame);
 }
 
 static struct hook_entry g_stepbp_required_hooks[] = {
-    HOOK_ENTRY("call_step_hook", work_trampoline_stepbp_single_step),
     HOOK_ENTRY("syscall_trace_exit", work_trampoline_stepbp_syscall_trace_exit),
 };
 
@@ -364,6 +361,11 @@ static struct hook_entry g_stepbp_switch_hook[] = {
 static int stepbp_install_required_hooks(void)
 {
     int count = sizeof(g_stepbp_required_hooks) / sizeof(g_stepbp_required_hooks[0]);
+
+    if (!g_stepbp_register_hook) g_stepbp_register_hook = (void *)generic_kallsyms_lookup_name("register_user_step_hook");
+    if (!g_stepbp_unregister_hook) g_stepbp_unregister_hook = (void *)generic_kallsyms_lookup_name("unregister_user_step_hook");
+    if (!g_stepbp_native_hooks) g_stepbp_native_hooks = (void *)generic_kallsyms_lookup_name("user_step_hook");
+    if (!g_stepbp_register_hook || !g_stepbp_unregister_hook || !g_stepbp_native_hooks) return -ENOENT;
 
     for (int i = 0; i < count; i++)
     {
@@ -376,11 +378,23 @@ static int stepbp_install_required_hooks(void)
         }
     }
 
+    if (!g_stepbp_hook_registered)
+    {
+        g_stepbp_user_hook.fn = stepbp_user_single_step;
+        g_stepbp_register_hook(&g_stepbp_user_hook);
+        g_stepbp_hook_registered = true;
+    }
+
     return 0;
 }
 
 static void stepbp_remove_required_hooks(void)
 {
+    if (g_stepbp_hook_registered)
+    {
+        g_stepbp_unregister_hook(&g_stepbp_user_hook);
+        g_stepbp_hook_registered = false;
+    }
     for (int i = (int)(sizeof(g_stepbp_required_hooks) / sizeof(g_stepbp_required_hooks[0])) - 1; i >= 0; i--) hook_entry_remove(&g_stepbp_required_hooks[i]);
 }
 

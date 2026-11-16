@@ -234,7 +234,7 @@ static int ptebp_handle_exec_fault(struct pt_regs *hook_regs)
         if (READ_ONCE(g_ptebp_stopping) || READ_ONCE(g_ptebp_mm) != mm || READ_ONCE(g_ptebp_info) != info) break;
 
         // 常见的单断点页直接命中页面所属槽位；同页其他断点才扫描配置表。
-        struct bp_point *hit_point = READ_ONCE(primary_point->hit_addr) == regs->pc ? primary_point : bp_info_find_point_by_pc(info, regs->pc);
+        struct bp_point *hit_point = READ_ONCE(primary_point->hit_addr) == regs->pc && bp_point_type_matches_task(primary_point, BP_BREAKPOINT_X, current) ? primary_point : bp_info_find_point_by_pc_for_task(info, regs->pc, current);
         if (hit_point && hit_point->on_hit)
         {
             // 回调直接修改本批使用的 GPR 和 FP/SIMD 软件现场，后续模拟继承修改结果。

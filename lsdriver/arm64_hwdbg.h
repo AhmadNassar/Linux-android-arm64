@@ -220,7 +220,7 @@ static int work_trampoline_breakpoint(struct pt_regs *hook_regs)
     {
         struct arch_hw_breakpoint info;
 
-        if (hw_breakpoint_parse(point, 0, &info) || info.ctrl.type != ARM_BREAKPOINT_EXECUTE || info.address != current_pc) continue;
+        if (!bp_point_scope_matches_task(point, current) || hw_breakpoint_parse(point, 0, &info) || info.ctrl.type != ARM_BREAKPOINT_EXECUTE || info.address != current_pc) continue;
 
         own_hit = true;
         point->on_hit(regs, &fp_regs, point);
@@ -279,7 +279,7 @@ static int work_trampoline_watchpoint(struct pt_regs *hook_regs)
     {
         struct arch_hw_breakpoint info;
 
-        if (hw_breakpoint_parse(point, 0, &info) || info.ctrl.type == ARM_BREAKPOINT_EXECUTE || !watchpoint_access_matches(&info, esr)) continue;
+        if (!bp_point_scope_matches_task(point, current) || hw_breakpoint_parse(point, 0, &info) || info.ctrl.type == ARM_BREAKPOINT_EXECUTE || !watchpoint_access_matches(&info, esr)) continue;
 
         uint64_t dist = get_distance_from_watchpoint(fault_addr, info.address, &info.ctrl);
         if (dist < min_dist)
@@ -414,7 +414,7 @@ static void install_hwbp_regs_on_cpu(struct break_point *bp_info)
     while ((point = bp_info_find_active_point(bp_info, &point_slot)))
     {
         struct arch_hw_breakpoint info;
-        if (hw_breakpoint_parse(point, 0, &info)) continue;
+        if (!bp_point_scope_matches_task(point, current) || hw_breakpoint_parse(point, 0, &info)) continue;
 
         if (info.ctrl.type == ARM_BREAKPOINT_EXECUTE)
         {
@@ -496,6 +496,7 @@ static void __attribute__((used, __noinline__)) ret_work_finish_task_switch(void
 
     if (bp_info_targets_task(bp_info, current) && bp_info_find_active_point(bp_info, NULL))
     {
+        clear_hwbp_regs_on_cpu(NULL);
         enable_hardware_debug_on_cpu(NULL);
         install_hwbp_regs_on_cpu(bp_info);
     }

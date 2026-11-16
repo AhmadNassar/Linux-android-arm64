@@ -61,9 +61,9 @@ static inline bool bp_point_is_configured_type(const struct bp_point *point, enu
 }
 
 // 判断指定类型断点的线程作用域是否覆盖当前任务。
-static inline bool bp_point_type_matches_task(const struct bp_point *point, enum bp_type type, struct task_struct *task)
+static inline bool bp_point_scope_matches_task(const struct bp_point *point, struct task_struct *task)
 {
-    if (!bp_point_is_configured_type(point, type) || !task) return false;
+    if (!bp_point_is_configured(point) || !task) return false;
 
     switch (READ_ONCE(point->bs))
     {
@@ -76,6 +76,11 @@ static inline bool bp_point_type_matches_task(const struct bp_point *point, enum
     default:
         return false;
     }
+}
+
+static inline bool bp_point_type_matches_task(const struct bp_point *point, enum bp_type type, struct task_struct *task)
+{
+    return bp_point_is_configured_type(point, type) && bp_point_scope_matches_task(point, task);
 }
 
 // 查找下一个已配置断点；next_slot 非空时由函数自动推进迭代位置。

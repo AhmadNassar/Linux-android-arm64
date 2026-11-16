@@ -412,8 +412,32 @@ static int stepbp_user_single_step(struct pt_regs *regs, stepbp_esr_t esr)
     return stepbp_finish_call_step_hook(native_result, &frame, esr);
 }
 
+/* syscall_trace_exit may sleep in audit/trace callbacks. A context switch can
+ * re-arm TIF_SINGLESTEP after its entry hook cleared it. At report_syscall only
+ * the synthetic ptrace stop remains; skip that call for our untraced target,
+ * while preserving audit, tracepoints, rseq and real ptrace syscall stops. */
+static int work_trampoline_stepbp_report_syscall(struct pt_regs *hook_regs)
+{
+    struct pt_regs *regs;
+    struct break_point *info;
+    unsigned long flags;
+    bool suppress = false;
+
+    if (!hook_regs || hook_regs->regs[1] != 1 || READ_ONCE(current->ptrace)) return 0;
+    regs = (struct pt_regs *)hook_regs->regs[0];
+    if (!regs || !user_mode(regs) || test_thread_flag(TIF_SYSCALL_TRACE)) return 0;
+
+    spin_lock_irqsave(&g_stepbp_lock, flags);
+    info = g_stepbp_info;
+    if (test_thread_flag(TIF_SINGLESTEP))
+        suppress = g_stepbp_stopping ? bp_info_targets_task(info, current) : !!bp_info_find_type_for_task(info, BP_BREAKPOINT_X, current);
+    spin_unlock_irqrestore(&g_stepbp_lock, flags);
+    return suppress ? 1 : 0;
+}
+
 static struct hook_entry g_stepbp_required_hooks[] = {
     HOOK_ENTRY("syscall_trace_exit", work_trampoline_stepbp_syscall_trace_exit),
+    HOOK_ENTRY("report_syscall", work_trampoline_stepbp_report_syscall),
 };
 
 static struct hook_entry g_stepbp_switch_hook[] = {

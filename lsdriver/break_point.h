@@ -4,6 +4,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/spinlock.h>
 #include <asm/ptrace.h>
 
 #include "io_version/io_struct.h"
@@ -617,9 +618,15 @@ static inline void sample_hbp_handler(struct pt_regs *regs, struct fp_regs *fp_r
     }
 }
 
+static DEFINE_SPINLOCK(g_bp_record_lock);
+
 static void sample_hbp_handler_entry(void *regs, void *fp_regs, void *hit_point)
 {
+    unsigned long flags;
+
+    spin_lock_irqsave(&g_bp_record_lock, flags);
     sample_hbp_handler((struct pt_regs *)regs, (struct fp_regs *)fp_regs, (struct bp_point *)hit_point);
+    spin_unlock_irqrestore(&g_bp_record_lock, flags);
 }
 
 static void prepare_break_point_handlers(struct break_point *info)

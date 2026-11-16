@@ -580,11 +580,11 @@ static bool dptbp_unmap_uses_shared_tables(const struct mmu_notifier_range *rang
 // 权限修改不释放页表页。新映射可能在复制后的父表中新增了路径，将缺失的
 // 私有父项接回源子表；共享 PTE 表的权限变化随后直接更新两种视图。
 // 已存在但不同的路径、受管私有 PTE 表和 block 映射继续走撤销保护。
-static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range *range)
+static bool dptbp_leaf_update_uses_shared_tables(const struct mmu_notifier_range *range)
 {
     bool updated = false;
 
-    if (range->event != MMU_NOTIFY_PROTECTION_VMA && range->event != MMU_NOTIFY_PROTECTION_PAGE) return false;
+    if (range->event != MMU_NOTIFY_PROTECTION_VMA && range->event != MMU_NOTIFY_PROTECTION_PAGE && range->event != MMU_NOTIFY_CLEAR) return false;
     if (range->start >= range->end || range->end > range->mm->task_size) return false;
 
     for (unsigned long addr = range->start; addr < range->end; addr = pmd_addr_end(addr, range->end))
@@ -645,7 +645,7 @@ static int dptbp_mmu_notifier_invalidate_range_start(struct mmu_notifier *notifi
     if (!dptbp_try_get_ref(DPTBP_REF_NOTIFIER)) return 0;
     int status = 0;
 
-    if (range->mm == g_dptbp_current.mm && !dptbp_unmap_uses_shared_tables(range) && !dptbp_protection_uses_shared_tables(range))
+    if (range->mm == g_dptbp_current.mm && !dptbp_unmap_uses_shared_tables(range) && !dptbp_leaf_update_uses_shared_tables(range))
     {
         // 全 CPU 视图恢复需要可阻塞上下文；非阻塞通知返回 -EAGAIN 交由上层处理。
         if (!mmu_notifier_range_blockable(range)) status = -EAGAIN;

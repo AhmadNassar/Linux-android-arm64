@@ -429,8 +429,7 @@ static int work_trampoline_stepbp_report_syscall(struct pt_regs *hook_regs)
 
     spin_lock_irqsave(&g_stepbp_lock, flags);
     info = g_stepbp_info;
-    if (test_thread_flag(TIF_SINGLESTEP))
-        suppress = g_stepbp_stopping ? bp_info_targets_task(info, current) : !!bp_info_find_type_for_task(info, BP_BREAKPOINT_X, current);
+    suppress = g_stepbp_stopping ? bp_info_targets_task(info, current) : !!bp_info_find_type_for_task(info, BP_BREAKPOINT_X, current);
     spin_unlock_irqrestore(&g_stepbp_lock, flags);
     return suppress ? 1 : 0;
 }

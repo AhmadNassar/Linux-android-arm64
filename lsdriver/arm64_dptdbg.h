@@ -76,6 +76,8 @@ struct dptbp_context
     struct dptbp_slot slots[BP_CONFIG_MAX]; // 与共享配置逐槽位对应的断点资源
     pgd_t *shadow_pgd; // 私有页表根页，目标主线程的断点视图使用此根
     void *table_pages[BP_CONFIG_MAX * CONFIG_PGTABLE_LEVELS]; // 自行复制的下级页表页，集中记录供回收
+    void *table_sources[BP_CONFIG_MAX * CONFIG_PGTABLE_LEVELS];
+    size_t root_size;
     struct mmu_notifier mmu_notifier; // 目标映射失效时撤销视图；ops 用于判断卸载时是否需要注销
 
     int sync_refs; // 同步异常使用者数量，通过原子操作增减
@@ -183,10 +185,46 @@ static bool dptbp_write_ttbr0(phys_addr_t pgd_pa, bool shadow)
     return true;
 }
 
+// 复制后的私有父表不自动看到后续新增的下级表。只补充源表已经出现、私有表
+// 仍为空的项，保留已有私有路径和执行副本；UNMAP notifier 仍负责撤销及生命周期。
+static bool dptbp_refresh_missing_tables(void)
+{
+    bool changed = false;
+    uint64_t *source = (uint64_t *)g_dptbp_current.mm->pgd;
+    uint64_t *shadow = (uint64_t *)g_dptbp_current.shadow_pgd;
+
+    for (size_t index = 0; index < g_dptbp_current.root_size / sizeof(*source); index++)
+    {
+        uint64_t value = READ_ONCE(source[index]);
+        if (value && !READ_ONCE(shadow[index]))
+        {
+            WRITE_ONCE(shadow[index], value);
+            changed = true;
+        }
+    }
+    for (size_t page = 0; page < ARRAY_SIZE(g_dptbp_current.table_pages) && g_dptbp_current.table_pages[page]; page++)
+    {
+        source = g_dptbp_current.table_sources[page];
+        shadow = g_dptbp_current.table_pages[page];
+        for (size_t index = 0; index < PAGE_SIZE / sizeof(*source); index++)
+        {
+            uint64_t value = READ_ONCE(source[index]);
+            if (value && !READ_ONCE(shadow[index]))
+            {
+                WRITE_ONCE(shadow[index], value);
+                changed = true;
+            }
+        }
+    }
+    if (changed) dsb(ishst);
+    return changed;
+}
+
 // TTBR0 PAN 模式更新线程保存的 ttbr0，供后续恢复用户访问时使用；其余模式直接写当前 CPU。
 // shadow=true 选择私有根页，false 选择目标 mm 的普通根页。
 static bool dptbp_write_task_view(struct task_struct *task, bool shadow)
 {
+    bool refreshed = shadow && dptbp_refresh_missing_tables();
     phys_addr_t pgd_pa = virt_to_phys(shadow ? g_dptbp_current.shadow_pgd : g_dptbp_current.mm->pgd);
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
@@ -195,12 +233,12 @@ static bool dptbp_write_task_view(struct task_struct *task, bool shadow)
         uint64_t current_ttbr = READ_ONCE(task_thread_info(task)->ttbr0);
         uint64_t next_ttbr = dptbp_compose_ttbr0(current_ttbr, pgd_pa, shadow);
 
-        if (current_ttbr == next_ttbr) return false;
+        if (current_ttbr == next_ttbr) return refreshed;
         WRITE_ONCE(task_thread_info(task)->ttbr0, next_ttbr);
         return true;
     }
 #endif
-    return dptbp_write_ttbr0(pgd_pa, shadow);
+    return dptbp_write_ttbr0(pgd_pa, shadow) || refreshed;
 }
 
 // on_each_cpu() 回调：按运行状态更新当前线程视图，调用方负责保持 context 资源有效。
@@ -275,13 +313,14 @@ static int dptbp_handle_undef_sync(struct pt_regs *hook_regs)
 {
     if (unlikely(!hook_regs)) return 0;
     uint64_t esr = read_sysreg(esr_el1);
-    if (unlikely(ESR_ELx_EC(esr) != ESR_ELx_EC_UNKNOWN)) return 0;
     if (unlikely(!dptbp_try_get_ref(DPTBP_REF_SYNC))) return 0;
     int result = 0;
     struct pt_regs *regs = (struct pt_regs *)(uintptr_t)hook_regs->regs[0];
 
     // hook_regs 是函数入口现场，参数 0 指向真正的用户异常寄存器现场。
     if (unlikely(!regs || !user_mode(regs) || current->mm != g_dptbp_current.mm)) goto out;
+    if (dptbp_task_uses_shadow(current) && dptbp_refresh_missing_tables()) flush_tlb_all();
+    if (ESR_ELx_EC(esr) != ESR_ELx_EC_UNKNOWN) goto out;
 
     uint64_t pc = regs->pc;
     for (size_t index = 0; index < ARRAY_SIZE(g_dptbp_current.slots); index++)
@@ -552,6 +591,7 @@ static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range 
     {
         pgd_t *source_pgd = pgd_offset(range->mm, addr);
         pgd_t *shadow_pgd = g_dptbp_current.shadow_pgd + pgd_index(addr);
+        if (pgd_none(*source_pgd) && pgd_none(*shadow_pgd)) continue;
         if (pgd_none(*source_pgd) || pgd_bad(*source_pgd)) return false;
         if (pgd_none(*shadow_pgd))
         {
@@ -561,6 +601,7 @@ static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range 
         if (pgd_bad(*shadow_pgd)) return false;
         p4d_t *source_p4d = p4d_offset(source_pgd, addr);
         p4d_t *shadow_p4d = p4d_offset(shadow_pgd, addr);
+        if (p4d_none(*source_p4d) && p4d_none(*shadow_p4d)) continue;
         if (p4d_none(*source_p4d) || p4d_bad(*source_p4d)) return false;
         if (p4d_none(*shadow_p4d))
         {
@@ -570,6 +611,7 @@ static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range 
         if (p4d_bad(*shadow_p4d)) return false;
         pud_t *source_pud = pud_offset(source_p4d, addr);
         pud_t *shadow_pud = pud_offset(shadow_p4d, addr);
+        if (pud_none(*source_pud) && pud_none(*shadow_pud)) continue;
         if (pud_none(*source_pud) || pud_leaf(*source_pud) || pud_bad(*source_pud)) return false;
         if (pud_none(*shadow_pud))
         {
@@ -579,6 +621,7 @@ static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range 
         if (pud_leaf(*shadow_pud) || pud_bad(*shadow_pud)) return false;
         pmd_t source_pmd = __pmd(READ_ONCE(pmd_val(*pmd_offset(source_pud, addr))));
         pmd_t *shadow_pmd = pmd_offset(shadow_pud, addr);
+        if (pmd_none(source_pmd) && pmd_none(*shadow_pmd)) continue;
         if (pmd_none(source_pmd) || pmd_leaf(source_pmd) || pmd_bad(source_pmd)) return false;
         if (pmd_none(*shadow_pmd))
         {
@@ -709,6 +752,7 @@ static void dptbp_release_shadow_pages(void)
     {
         if (g_dptbp_current.table_pages[index - 1]) free_page((unsigned long)g_dptbp_current.table_pages[index - 1]);
         g_dptbp_current.table_pages[index - 1] = NULL;
+        g_dptbp_current.table_sources[index - 1] = NULL;
     }
     if (g_dptbp_current.shadow_pgd) free_page((unsigned long)g_dptbp_current.shadow_pgd);
     g_dptbp_current.shadow_pgd = NULL;
@@ -774,6 +818,7 @@ static void *dptbp_clone_table_page(void *source_table)
     if (!page) return ERR_PTR(-ENOMEM);
     __builtin_memcpy(page, (void *)((unsigned long)source_table & PAGE_MASK), PAGE_SIZE);
     g_dptbp_current.table_pages[index] = page;
+    g_dptbp_current.table_sources[index] = (void *)((unsigned long)source_table & PAGE_MASK);
     return page;
 }
 
@@ -959,6 +1004,7 @@ static int dptbp_prepare_slots(struct break_point *info)
     // 高层在运行时折叠时，内核为根表分配整页；PGD_SIZE 仍是编译期大小，不能用于截断复制。
     size_t root_size = PGD_SIZE;
     if ((CONFIG_PGTABLE_LEVELS == 5 && mm_p4d_folded(mm)) || (CONFIG_PGTABLE_LEVELS == 4 && mm_pud_folded(mm))) root_size = PAGE_SIZE;
+    g_dptbp_current.root_size = root_size;
     __builtin_memcpy(g_dptbp_current.shadow_pgd, mm->pgd, root_size);
     for (size_t index = 0; index < ARRAY_SIZE(g_dptbp_current.slots); index++)
     {

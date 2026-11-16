@@ -291,6 +291,9 @@ static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int 
         if (!READ_ONCE(g_stepbp_stopping) && READ_ONCE(g_stepbp_generation) == hit_generation)
         {
             struct fp_regs fp_regs __attribute__((__uninitialized__));
+#ifdef SGAME_STEPBP_TRACE
+            ls_log_always_tag("stepbp-trace", "tid=%d pc=0x%llx x0=0x%llx esr=0x%llx pstate=0x%llx\n", current->pid, (unsigned long long)regs->pc, (unsigned long long)regs->regs[0], (unsigned long long)read_sysreg(esr_el1), (unsigned long long)regs->pstate);
+#endif
             read_all_q_regs(&fp_regs);
             hit_callback(regs, &fp_regs, hit_point);
             write_all_q_regs(&fp_regs);
@@ -441,7 +444,7 @@ static inline void stop_stepbp_monitor(void)
     mutex_unlock(&g_stepbp_mutex);
 }
 
-// 安装 STEPBP：直接持有共享配置指针、hook call_step_hook，并启用目标线程单步。
+// 安装 STEPBP：持有共享配置指针、注册原生 step hook，并启用目标线程单步。
 static inline int start_stepbp_monitor(struct break_point *info)
 {
     pid_t target_tgid;

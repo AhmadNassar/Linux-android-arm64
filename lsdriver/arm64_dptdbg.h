@@ -538,14 +538,39 @@ static bool dptbp_unmap_uses_shared_tables(const struct mmu_notifier_range *rang
     return true;
 }
 
-// 共享根表仍由其他 VMA 保留时，无关 UNMAP 不影响私有路径；其他失效保留撤销保护。
+// 权限修改不释放页表页；若整个范围仍共享同一 PTE 表，普通页表的更新也直接
+// 更新执行视图。私有 PTE 表、block 映射和缺失路径继续走撤销保护。
+static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range *range)
+{
+    if (range->event != MMU_NOTIFY_PROTECTION_VMA && range->event != MMU_NOTIFY_PROTECTION_PAGE) return false;
+    if (range->start >= range->end || range->end > range->mm->task_size) return false;
+
+    for (unsigned long addr = range->start; addr < range->end; addr = pmd_addr_end(addr, range->end))
+    {
+        pgd_t *source_pgd = pgd_offset(range->mm, addr);
+        pgd_t *shadow_pgd = g_dptbp_current.shadow_pgd + pgd_index(addr);
+        if (pgd_none(*source_pgd) || pgd_bad(*source_pgd) || pgd_none(*shadow_pgd) || pgd_bad(*shadow_pgd)) return false;
+        p4d_t *source_p4d = p4d_offset(source_pgd, addr);
+        p4d_t *shadow_p4d = p4d_offset(shadow_pgd, addr);
+        if (p4d_none(*source_p4d) || p4d_bad(*source_p4d) || p4d_none(*shadow_p4d) || p4d_bad(*shadow_p4d)) return false;
+        pud_t *source_pud = pud_offset(source_p4d, addr);
+        pud_t *shadow_pud = pud_offset(shadow_p4d, addr);
+        if (pud_none(*source_pud) || pud_leaf(*source_pud) || pud_bad(*source_pud) || pud_none(*shadow_pud) || pud_leaf(*shadow_pud) || pud_bad(*shadow_pud)) return false;
+        pmd_t source_pmd = __pmd(READ_ONCE(pmd_val(*pmd_offset(source_pud, addr))));
+        pmd_t shadow_pmd = __pmd(READ_ONCE(pmd_val(*pmd_offset(shadow_pud, addr))));
+        if (pmd_none(source_pmd) || pmd_leaf(source_pmd) || pmd_bad(source_pmd) || pmd_val(source_pmd) != pmd_val(shadow_pmd)) return false;
+    }
+    return true;
+}
+
+// 无关 UNMAP 保留根表存活校验；共享 PTE 表内的权限修改不撤销断点。
 static int dptbp_mmu_notifier_invalidate_range_start(struct mmu_notifier *notifier, const struct mmu_notifier_range *range)
 {
     (void)notifier;
     if (!dptbp_try_get_ref(DPTBP_REF_NOTIFIER)) return 0;
     int status = 0;
 
-    if (range->mm == g_dptbp_current.mm && !dptbp_unmap_uses_shared_tables(range))
+    if (range->mm == g_dptbp_current.mm && !dptbp_unmap_uses_shared_tables(range) && !dptbp_protection_uses_shared_tables(range))
     {
         // 全 CPU 视图恢复需要可阻塞上下文；非阻塞通知返回 -EAGAIN 交由上层处理。
         if (!mmu_notifier_range_blockable(range)) status = -EAGAIN;

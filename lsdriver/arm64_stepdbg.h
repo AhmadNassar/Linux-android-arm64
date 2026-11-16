@@ -369,10 +369,16 @@ static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int 
 
 static struct step_hook g_stepbp_user_hook;
 
+/* Older GKI kernels use a 32-bit ESR callback. Derive the exact native type so
+ * CFI also agrees when a vendor backports the widened prototype. */
+typedef typeof(__builtin_choose_expr(
+    __builtin_types_compatible_p(typeof(((struct step_hook *)0)->fn), int (*)(struct pt_regs *, unsigned int)),
+    (unsigned int)0, (unsigned long)0)) stepbp_esr_t;
+
 /* The compiler can inline call_step_hook into single_step_handler. Register a
  * native hook so both the inlined and out-of-line dispatch paths reach us.
  * Preserve the remaining native hooks before recording our own step. */
-static int stepbp_user_single_step(struct pt_regs *regs, unsigned long esr)
+static int stepbp_user_single_step(struct pt_regs *regs, stepbp_esr_t esr)
 {
     unsigned long flags;
     unsigned long generation;

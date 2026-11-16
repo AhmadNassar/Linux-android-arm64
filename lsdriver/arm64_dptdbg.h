@@ -538,10 +538,13 @@ static bool dptbp_unmap_uses_shared_tables(const struct mmu_notifier_range *rang
     return true;
 }
 
-// 权限修改不释放页表页；若整个范围仍共享同一 PTE 表，普通页表的更新也直接
-// 更新执行视图。私有 PTE 表、block 映射和缺失路径继续走撤销保护。
+// 权限修改不释放页表页。新映射可能在复制后的父表中新增了路径，将缺失的
+// 私有父项接回源子表；共享 PTE 表的权限变化随后直接更新两种视图。
+// 已存在但不同的路径、受管私有 PTE 表和 block 映射继续走撤销保护。
 static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range *range)
 {
+    bool updated = false;
+
     if (range->event != MMU_NOTIFY_PROTECTION_VMA && range->event != MMU_NOTIFY_PROTECTION_PAGE) return false;
     if (range->start >= range->end || range->end > range->mm->task_size) return false;
 
@@ -549,16 +552,45 @@ static bool dptbp_protection_uses_shared_tables(const struct mmu_notifier_range 
     {
         pgd_t *source_pgd = pgd_offset(range->mm, addr);
         pgd_t *shadow_pgd = g_dptbp_current.shadow_pgd + pgd_index(addr);
-        if (pgd_none(*source_pgd) || pgd_bad(*source_pgd) || pgd_none(*shadow_pgd) || pgd_bad(*shadow_pgd)) return false;
+        if (pgd_none(*source_pgd) || pgd_bad(*source_pgd)) return false;
+        if (pgd_none(*shadow_pgd))
+        {
+            WRITE_ONCE(*shadow_pgd, *source_pgd);
+            updated = true;
+        }
+        if (pgd_bad(*shadow_pgd)) return false;
         p4d_t *source_p4d = p4d_offset(source_pgd, addr);
         p4d_t *shadow_p4d = p4d_offset(shadow_pgd, addr);
-        if (p4d_none(*source_p4d) || p4d_bad(*source_p4d) || p4d_none(*shadow_p4d) || p4d_bad(*shadow_p4d)) return false;
+        if (p4d_none(*source_p4d) || p4d_bad(*source_p4d)) return false;
+        if (p4d_none(*shadow_p4d))
+        {
+            WRITE_ONCE(*shadow_p4d, *source_p4d);
+            updated = true;
+        }
+        if (p4d_bad(*shadow_p4d)) return false;
         pud_t *source_pud = pud_offset(source_p4d, addr);
         pud_t *shadow_pud = pud_offset(shadow_p4d, addr);
-        if (pud_none(*source_pud) || pud_leaf(*source_pud) || pud_bad(*source_pud) || pud_none(*shadow_pud) || pud_leaf(*shadow_pud) || pud_bad(*shadow_pud)) return false;
+        if (pud_none(*source_pud) || pud_leaf(*source_pud) || pud_bad(*source_pud)) return false;
+        if (pud_none(*shadow_pud))
+        {
+            WRITE_ONCE(*shadow_pud, *source_pud);
+            updated = true;
+        }
+        if (pud_leaf(*shadow_pud) || pud_bad(*shadow_pud)) return false;
         pmd_t source_pmd = __pmd(READ_ONCE(pmd_val(*pmd_offset(source_pud, addr))));
-        pmd_t shadow_pmd = __pmd(READ_ONCE(pmd_val(*pmd_offset(shadow_pud, addr))));
-        if (pmd_none(source_pmd) || pmd_leaf(source_pmd) || pmd_bad(source_pmd) || pmd_val(source_pmd) != pmd_val(shadow_pmd)) return false;
+        pmd_t *shadow_pmd = pmd_offset(shadow_pud, addr);
+        if (pmd_none(source_pmd) || pmd_leaf(source_pmd) || pmd_bad(source_pmd)) return false;
+        if (pmd_none(*shadow_pmd))
+        {
+            WRITE_ONCE(*shadow_pmd, source_pmd);
+            updated = true;
+        }
+        if (pmd_val(source_pmd) != READ_ONCE(pmd_val(*shadow_pmd))) return false;
+    }
+    if (updated)
+    {
+        dsb(ishst);
+        flush_tlb_all();
     }
     return true;
 }

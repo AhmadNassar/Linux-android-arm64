@@ -14,7 +14,7 @@
     "lsdriver/arm64_ptedbg.h": "57a5519205a9720878d880faab929b04982a17ba5e72fcd70542c503a1a1fe88"
   },
   "modified_upstream_files": {
-    "lsdriver/arm64_ptedbg-20260822-000439.h": "Prepare all slots and publish exception state before guarding pages and writing UDF instructions"
+    "lsdriver/arm64_ptedbg-20260822-000439.h": "Prepare/publish before arming; serialize exception shadow reads with teardown; use mmap trylock and session generation for exception rollback"
   },
   "previous_upstream_commit": "587c3bdfa29b3523f79f5ce2bf6f3c1ac3087e51",
   "cpu_render": "disabled-upstream"

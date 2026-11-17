@@ -49,6 +49,7 @@ static struct ptebp_slot g_ptebp_slots[BP_CONFIG_MAX];
 static DEFINE_SPINLOCK(g_ptebp_lock);
 static DEFINE_MUTEX(g_ptebp_control_lock);
 static bool g_ptebp_stopping;
+static unsigned long g_ptebp_generation;
 
 // 从原始 PTE 派生禁止用户态读写的 guard PTE，同时保留地址及其他属性位。
 static inline pteval_t ptebp_make_data_guard_pte(pteval_t value)
@@ -121,7 +122,7 @@ static inline int ptebp_restore_inst(struct ptebp_slot *slot)
     return ptebp_write_inst(slot, &inst);
 }
 
-// 无锁按页查找共享影子页，供只读异常路径使用。
+// 调用方持有槽位锁，按页查找共享影子页。
 static void *ptebp_find_shadow_page(uint64_t page_vaddr)
 {
     for (size_t slot_index = 0; slot_index < ARRAY_SIZE(g_ptebp_slots); slot_index++)
@@ -613,10 +614,10 @@ emulate_failed:
 /*
 停止整组 PTEBP 监控：对 PTE 仍匹配 guard 的槽位尝试恢复原始指令和原始 PTE，
 清空全局状态，并释放去重后的共享影子页。
-lock_mm 为 true 时函数自行获取目标 mm 的 mmap 读锁；为 false 时供异常路径调用，
-不额外获取该锁。
+lock_mm 为 true 时阻塞获取 mmap 读锁；异常路径只尝试获取，失败时保留监控并重试。
+generation 非零时只撤销触发该次异常的会话，避免撤销随后安装的新会话。
 */
-static void ptebp_drop_all_monitors(bool lock_mm)
+static void ptebp_drop_all_monitors(bool lock_mm, unsigned long generation)
 {
     void *shadow_pages[BP_CONFIG_MAX] = {NULL};
     size_t shadow_page_count = 0;
@@ -626,10 +627,13 @@ static void ptebp_drop_all_monitors(bool lock_mm)
     spin_lock_irqsave(&g_ptebp_lock, flags);
 
     // 无需撤销监控或已在停止流程中时直接退出。
-    if (g_ptebp_stopping || !g_ptebp_mm) goto out_unlock;
+    if (g_ptebp_stopping || !g_ptebp_mm || (generation && generation != g_ptebp_generation)) goto out_unlock;
 
-    g_ptebp_stopping = true;
     mm = g_ptebp_mm;
+
+    // 异常入口不能睡眠；拿不到 mmap 锁时不改变页面或发布停止状态。
+    if (!lock_mm && !mmap_read_trylock(mm)) goto out_unlock;
+    g_ptebp_stopping = true;
 
     // 正常路径需睡眠，临时释放自旋锁获取 mmap 读锁。
     if (lock_mm)
@@ -669,14 +673,14 @@ static void ptebp_drop_all_monitors(bool lock_mm)
 
     // 重置全部全局状态。
     g_ptebp_info = NULL;
-    g_ptebp_mm = NULL;
+    WRITE_ONCE(g_ptebp_mm, NULL);
     memset(g_ptebp_slots, 0, sizeof(g_ptebp_slots));
     g_ptebp_stopping = false;
 
     spin_unlock_irqrestore(&g_ptebp_lock, flags);
 
     // 释放 mmap 读锁、共享影子页和 mm 引用。
-    if (lock_mm) mmap_read_unlock(mm);
+    mmap_read_unlock(mm);
     for (size_t page_index = 0; page_index < shadow_page_count; page_index++) free_page((unsigned long)shadow_pages[page_index]);
     mmput(mm);
     ls_log_always_tag("ptebp", "stop complete source=%s shadow_pages=%zu\n", lock_mm ? "control" : "exception", shadow_page_count);
@@ -696,6 +700,8 @@ static int ptebp_handle_data_abort(struct pt_regs *hook_regs)
     struct pt_regs *regs;
     uint64_t far, esr, fault_page;
     uint32_t raw_inst;
+    unsigned long flags, generation;
+    bool observed_target;
 
     far = hook_regs->regs[0];
     esr = hook_regs->regs[1];
@@ -707,8 +713,15 @@ static int ptebp_handle_data_abort(struct pt_regs *hook_regs)
 
     fault_page = untagged_addr(far) & PAGE_MASK;
 
-    // 确认当前进程属于监控目标。
-    if (!smp_load_acquire(&g_ptebp_info) || g_ptebp_mm != current->mm) return 0;
+    // 与安装、撤销同步，影子页的整个读取过程都受同一把锁保护。
+    observed_target = READ_ONCE(g_ptebp_mm) == current->mm;
+    spin_lock_irqsave(&g_ptebp_lock, flags);
+    if (!g_ptebp_info || g_ptebp_mm != current->mm)
+    {
+        if (observed_target) goto abort_handled;
+        goto abort_unhandled;
+    }
+    generation = g_ptebp_generation;
 
     // 匹配命中当前故障页的首个有效槽位
     for (size_t slot_index = 0; slot_index < ARRAY_SIZE(g_ptebp_slots); slot_index++)
@@ -721,7 +734,7 @@ static int ptebp_handle_data_abort(struct pt_regs *hook_regs)
     }
 
     // 槽位不存在，说明非本模块接管的异常
-    if (!slot) return 0;
+    if (!slot) goto abort_unhandled;
 
     // 停止流程正在进行时不再模拟，保持原 PC 等待 PTE 恢复后重试。
     if (g_ptebp_stopping) goto abort_handled;
@@ -737,8 +750,6 @@ static int ptebp_handle_data_abort(struct pt_regs *hook_regs)
         void *shadow_page;
 
         if (!IS_ALIGNED(pc, sizeof(raw_inst)) || pc >= current->mm->task_size) goto fallback_drop;
-
-        if (!g_ptebp_info || g_ptebp_mm != current->mm || g_ptebp_stopping) goto fallback_drop;
 
         shadow_page = (pc & PAGE_MASK) == slot->page_vaddr ? slot->shadow_page : NULL;
         if (!shadow_page) shadow_page = ptebp_find_shadow_page(pc & PAGE_MASK);
@@ -763,11 +774,19 @@ static int ptebp_handle_data_abort(struct pt_regs *hook_regs)
     }
 
 fallback_drop:
-    ptebp_drop_all_monitors(false);
-
-abort_handled:
+    spin_unlock_irqrestore(&g_ptebp_lock, flags);
+    ptebp_drop_all_monitors(false, generation);
     hook_regs->regs[0] = 0;
     return 1;
+
+abort_handled:
+    spin_unlock_irqrestore(&g_ptebp_lock, flags);
+    hook_regs->regs[0] = 0;
+    return 1;
+
+abort_unhandled:
+    spin_unlock_irqrestore(&g_ptebp_lock, flags);
+    return 0;
 }
 // ======================== UDF 断点命中处理 ========================
 
@@ -779,6 +798,8 @@ static int ptebp_handle_undef_sync(struct pt_regs *hook_regs)
     struct pt_regs *regs;
     uint32_t emulate_inst_word;
     uint64_t pc;
+    unsigned long flags, generation;
+    bool observed_target;
 
     // UDF #0 进入 Unknown/Uncategorized；其他同步异常交给原生分发器。
     if (ESR_ELx_EC(read_sysreg(esr_el1)) != ESR_ELx_EC_UNKNOWN) return 0;
@@ -790,24 +811,36 @@ static int ptebp_handle_undef_sync(struct pt_regs *hook_regs)
     pc = untagged_addr(regs->pc);
 
     // 确认目标 mm，按 PC 找到断点槽位并从影子页取出原始指令。
-    if (!smp_load_acquire(&g_ptebp_info) || g_ptebp_mm != current->mm) return 0;
+    observed_target = READ_ONCE(g_ptebp_mm) == current->mm;
+    spin_lock_irqsave(&g_ptebp_lock, flags);
+    if (!g_ptebp_info || g_ptebp_mm != current->mm)
+    {
+        spin_unlock_irqrestore(&g_ptebp_lock, flags);
+        return observed_target ? 1 : 0;
+    }
+    generation = g_ptebp_generation;
 
     for (size_t point_slot = 0; point_slot < ARRAY_SIZE(g_ptebp_slots); point_slot++)
     {
         if (g_ptebp_slots[point_slot].hook_addr != pc) continue;
-        if (ptebp_read_shadow_inst(&g_ptebp_slots[point_slot], &emulate_inst_word)) return 0;
+        if (ptebp_read_shadow_inst(&g_ptebp_slots[point_slot], &emulate_inst_word)) break;
         hit_point = &g_ptebp_info->points[point_slot];
         break;
     }
 
-    if (!hit_point) return 0;
-    if (g_ptebp_stopping) return 1;
+    if (!hit_point || g_ptebp_stopping)
+    {
+        bool handled = hit_point != NULL;
+        spin_unlock_irqrestore(&g_ptebp_lock, flags);
+        return handled ? 1 : 0;
+    }
 
     read_all_q_regs(&fp_regs);
     if (hit_point->on_hit) hit_point->on_hit(regs, &fp_regs, hit_point);
+    spin_unlock_irqrestore(&g_ptebp_lock, flags);
 
-    // 回调未改写 PC 时模拟原始指令；模拟失败则撤销监控，使原生路径重试。
-    if (regs->pc == pc && !emulate_inst(regs, &fp_regs, emulate_inst_word)) ptebp_drop_all_monitors(false);
+    // 模拟访存可能再次进入数据异常，必须在释放槽位锁后执行。
+    if (regs->pc == pc && !emulate_inst(regs, &fp_regs, emulate_inst_word)) ptebp_drop_all_monitors(false, generation);
 
     write_all_q_regs(&fp_regs);
     return 1;
@@ -827,7 +860,7 @@ static int ptebp_handle_mprotect(struct pt_regs *hook_regs)
     if (!current->mm || (current->flags & PF_EXITING)) return 0;
 
     // __arm64_sys_mprotect 是全局 hook；先用当前进程 mm 做快速过滤，非目标进程立即放行。
-    if (!g_ptebp_info || g_ptebp_mm != current->mm || g_ptebp_stopping) return 0;
+    if (!smp_load_acquire(&g_ptebp_info) || READ_ONCE(g_ptebp_mm) != current->mm || READ_ONCE(g_ptebp_stopping)) return 0;
 
     sys_regs = (struct pt_regs *)(uintptr_t)hook_regs->regs[0];
     if (!user_mode(sys_regs)) return 0;
@@ -995,7 +1028,7 @@ static struct hook_entry g_ptebp_hooks[][1] = {
 // 调用方持有控制锁时，撤销代码/PTE 状态并移除全部 hook。
 static void ptebp_stop_locked(void)
 {
-    ptebp_drop_all_monitors(true);
+    ptebp_drop_all_monitors(true, 0);
     for (int hook_index = ARRAY_SIZE(g_ptebp_hooks) - 1; hook_index >= 0; hook_index--) inline_hook_remove(g_ptebp_hooks[hook_index]);
 }
 
@@ -1047,7 +1080,8 @@ static int start_ptebp_monitor(struct break_point *info)
     mmap_read_lock(mm);
     spin_lock_irqsave(&g_ptebp_lock, flags);
 
-    g_ptebp_mm = mm;
+    WRITE_ONCE(g_ptebp_mm, mm);
+    if (!++g_ptebp_generation) ++g_ptebp_generation;
 
     // 先完整准备槽位；这一阶段不修改目标指令或页表。
     for (size_t i = 0; i < ARRAY_SIZE(info->points); i++)
@@ -1138,7 +1172,7 @@ static int start_ptebp_monitor(struct break_point *info)
 
     if (!status)
     {
-        // release 与两个异常入口的 acquire 配对，异常处理先于任何目标页变化就绪。
+        // 两个异常入口也持有槽位锁，只有完整安装或回滚结束后才继续处理。
         smp_store_release(&g_ptebp_info, info);
 
         for (size_t i = 0; i < ARRAY_SIZE(g_ptebp_slots); i++)

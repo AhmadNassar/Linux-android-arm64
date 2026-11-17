@@ -17,6 +17,7 @@ enum { BP_CONFIG_MAX = 16, PAGE_SIZE = 4096, GFP_ATOMIC = 0, __GFP_ZERO = 0 };
 #define __pte(x) (x)
 #define pte_val(x) (x)
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
 #define smp_load_acquire(p) (*(p))
 #define smp_store_release(p, v) (*(p) = (v))
 #define untagged_addr(x) (x)
@@ -24,8 +25,9 @@ enum { BP_CONFIG_MAX = 16, PAGE_SIZE = 4096, GFP_ATOMIC = 0, __GFP_ZERO = 0 };
 #define mutex_unlock(x) ((void)(x))
 #define spin_lock_irqsave(x, f) ((void)(x), (f) = 0)
 #define spin_unlock_irqrestore(x, f) ((void)(x), (void)(f))
-#define mmap_read_lock(x) ((void)(x))
-#define mmap_read_unlock(x) ((void)(x))
+#define mmap_read_lock(x) ((void)(x), ++mmap_locks)
+#define mmap_read_unlock(x) ((void)(x), --mmap_locks)
+#define mmap_read_trylock(x) ((void)(x), trylock_succeeds ? (++mmap_locks, 1) : 0)
 #define ls_log_always_tag(...) ((void)0)
 typedef uint64_t pte_t;
 typedef uint64_t pteval_t;
@@ -43,12 +45,15 @@ static struct mm_struct *g_ptebp_mm;
 static struct ptebp_slot g_ptebp_slots[BP_CONFIG_MAX];
 static int g_ptebp_lock, g_ptebp_control_lock, g_ptebp_hooks[4][1];
 static bool g_ptebp_stopping;
+static unsigned long g_ptebp_generation;
 static struct mm_struct target_mm = {0x40000};
 static uint32_t memory[3][PAGE_SIZE / 4], original[3][PAGE_SIZE / 4];
 static pteval_t page_ptes[3];
 static int references, allocations, guard_writes, marker_writes;
 static int fail_guard, fail_marker;
 static unsigned observations;
+static int mmap_locks;
+static bool trylock_succeeds = true;
 
 static size_t page_index(uint64_t address) {
     assert(address >= 0x10000 && address < 0x40000);
@@ -107,6 +112,7 @@ static void observe_target(void) {
 }
 static int write_user_pte_value(struct mm_struct *mm, uint64_t address, pteval_t value) {
     assert(mm == &target_mm);
+    assert(mmap_locks > 0);
     if (!(value & PTE_USER)) {
         observe_target();
         if (++guard_writes == fail_guard) return -EIO;
@@ -148,10 +154,17 @@ static void check_case(int guard_failure, int marker_failure, bool invalid_last)
     } else {
         assert(!result && guard_writes == 2 && marker_writes == 3);
         observe_target();
+        ptebp_drop_all_monitors(false, g_ptebp_generation + 1);
+        assert(g_ptebp_info == &info);
+        trylock_succeeds = false;
+        ptebp_drop_all_monitors(false, g_ptebp_generation);
+        assert(g_ptebp_info == &info && !g_ptebp_stopping && !mmap_locks);
+        trylock_succeeds = true;
+        ptebp_drop_all_monitors(false, g_ptebp_generation);
         ptebp_stop_locked();
     }
     assert(!g_ptebp_info && !g_ptebp_mm && !g_ptebp_stopping);
-    assert(!references && !allocations);
+    assert(!references && !allocations && !mmap_locks);
     assert(!memcmp(memory, original, sizeof(memory)));
     for (size_t i = 0; i < ARRAY_SIZE(page_ptes); ++i) assert(page_ptes[i] & PTE_USER);
 }
@@ -162,5 +175,5 @@ int main(void) {
     check_case(2, 0, false);
     check_case(0, 2, false);
     check_case(0, 0, true);
-    printf("PASS: production PTE installer; %u interleaved observations, shared page, guard/partial-marker failure rollback, invalid configuration\n", observations);
+    printf("PASS: production PTE lifecycle; %u interleaved observations, shared page, failure rollback, mmap trylock retry, stale-generation rejection\n", observations);
 }

@@ -34,8 +34,8 @@ assert 'kernel_render/cpu/cpu_render.o' in code('lsdriver/Makefile')
 assert 'SGAME_READ_NC ?= 0' in code('lsdriver/Makefile')
 assert 'SGAME_UNAVAILABLE_PTEDBG_H' not in code('lsdriver/arm64_ptedbg.h')
 breakpoints = code('lsdriver/break_point.h')
-assert '#include "arm64_ptedbg.h"' in breakpoints
-assert '#include "arm64_ptedbg-' not in breakpoints
+assert '#include "arm64_ptedbg-20260822-000439.h"' in breakpoints
+assert '#include "arm64_ptedbg.h"' not in breakpoints
 assert 'READ_ONCE(g_ptebp_info)' in breakpoints
 assert 'git apply' not in (ROOT/'sgame/export_source.py').read_text()
 for name in ('build-read-matrix.sh', 'build-5.10.sh', 'build_5_10.py', '5.10-baselines.json',

@@ -10,14 +10,10 @@
     "lsdriver/io_version/version.h": "b680c2b79a5696321fa3fc1961c433ced652d728fcd70a003cd74b2dca1276d2",
     "lsdriver/hide_task.h": "96840772056d3d8cb118f605a62d0fd5145507df14b987592c6158dbe9c46d8b",
     "lsdriver/hide_kgsl.h": "7768d079f260cbbcf4f7fd4f3917b0cc8f837ce54cb035c10329c1cba090457c",
-    "lsdriver/hide_proc.h": "bcbf8126e8115ff85f36ada0ceb6c961417e5805c0b1932554b4d311a24f96de"
+    "lsdriver/hide_proc.h": "bcbf8126e8115ff85f36ada0ceb6c961417e5805c0b1932554b4d311a24f96de",
+    "lsdriver/arm64_ptedbg.h": "57a5519205a9720878d880faab929b04982a17ba5e72fcd70542c503a1a1fe88",
+    "lsdriver/arm64_ptedbg-20260822-000439.h": "94821a3efeec4255c30ef00b3ce15f0f8fa01b5f9255033bc0cf4c8464c1c608"
   },
   "previous_upstream_commit": "adef23a7e537efc937f01cfbbd44c3c7c33be216",
-  "cpu_render": "disabled-upstream",
-  "adapted_upstream": {
-    "lsdriver/arm64_ptedbg.h": {
-      "upstream_sha256": "57a5519205a9720878d880faab929b04982a17ba5e72fcd70542c503a1a1fe88",
-      "reason": "Honor the configured thread scope in the primary-page fast path and secondary-point lookup; device regression reproduced on Android 16 KMI 6."
-    }
-  }
+  "cpu_render": "disabled-upstream"
 }

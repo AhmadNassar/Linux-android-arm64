@@ -708,7 +708,7 @@ static int ptebp_handle_data_abort(struct pt_regs *hook_regs)
     fault_page = untagged_addr(far) & PAGE_MASK;
 
     // 确认当前进程属于监控目标。
-    if (!g_ptebp_info || g_ptebp_mm != current->mm) return 0;
+    if (!smp_load_acquire(&g_ptebp_info) || g_ptebp_mm != current->mm) return 0;
 
     // 匹配命中当前故障页的首个有效槽位
     for (size_t slot_index = 0; slot_index < ARRAY_SIZE(g_ptebp_slots); slot_index++)
@@ -790,7 +790,7 @@ static int ptebp_handle_undef_sync(struct pt_regs *hook_regs)
     pc = untagged_addr(regs->pc);
 
     // 确认目标 mm，按 PC 找到断点槽位并从影子页取出原始指令。
-    if (!g_ptebp_info || g_ptebp_mm != current->mm) return 0;
+    if (!smp_load_acquire(&g_ptebp_info) || g_ptebp_mm != current->mm) return 0;
 
     for (size_t point_slot = 0; point_slot < ARRAY_SIZE(g_ptebp_slots); point_slot++)
     {
@@ -1008,8 +1008,8 @@ static inline void stop_ptebp_monitor(void)
 }
 
 /*
-校验执行断点配置，安装异常 hook，并为目标进程的每个受管页创建或复用内核影子页，
-写入 UDF、设置 guard PTE；全部断点成功后才发布监控状态。
+先准备全部槽位和原始影子页，再发布异常处理状态。
+所有受管页启用 guard PTE 后才写入 UDF，安装期间的执行和读取也由异常入口接管。
 */
 static int start_ptebp_monitor(struct break_point *info)
 {
@@ -1049,7 +1049,7 @@ static int start_ptebp_monitor(struct break_point *info)
 
     g_ptebp_mm = mm;
 
-    // 逐个安装配置中的执行断点，全部成功后再一次性发布监控状态。
+    // 先完整准备槽位；这一阶段不修改目标指令或页表。
     for (size_t i = 0; i < ARRAY_SIZE(info->points); i++)
     {
         if (!bp_point_is_configured_type(&info->points[i], BP_BREAKPOINT_X)) continue;
@@ -1059,7 +1059,6 @@ static int start_ptebp_monitor(struct break_point *info)
         uint64_t hook_addr = untagged_addr(info->points[i].hit_addr) & ~0x3ULL;
         uint64_t page_vaddr;
         uint32_t original_inst;
-        uint32_t marker_inst = PTEBP_UDF_INST;
         pteval_t orig_value = 0;
 
         if (!hook_addr || hook_addr >= g_ptebp_mm->task_size)
@@ -1083,11 +1082,6 @@ static int start_ptebp_monitor(struct break_point *info)
 
         if (page_owner_slot < ARRAY_SIZE(g_ptebp_slots))
         {
-            if (!ptebp_validate_guard_pte(g_ptebp_mm, g_ptebp_slots[page_owner_slot].hook_addr, g_ptebp_slots[page_owner_slot].orig_pte))
-            {
-                status = -EFAULT;
-                break;
-            }
             shadow_page = g_ptebp_slots[page_owner_slot].shadow_page;
             if (!shadow_page)
             {
@@ -1133,32 +1127,51 @@ static int start_ptebp_monitor(struct break_point *info)
         };
 
         status = ptebp_read_shadow_inst(&g_ptebp_slots[i], &original_inst);
-        if (status) goto clear_slot;
+        if (status) break;
         if (original_inst == PTEBP_UDF_INST)
         {
             status = -ESTALE;
-            goto clear_slot;
+            break;
         }
 
-        status = ptebp_write_inst(&g_ptebp_slots[i], &marker_inst);
-        if (status) goto restore_slot;
-        if (page_owner_slot == ARRAY_SIZE(g_ptebp_slots))
-        {
-            status = write_user_pte_value(g_ptebp_mm, page_vaddr, ptebp_make_data_guard_pte(pte_val(g_ptebp_slots[i].orig_pte)));
-            if (status) goto restore_slot;
-        }
-        continue;
-
-    restore_slot:
-        (void)ptebp_restore_inst(&g_ptebp_slots[i]);
-    clear_slot:
-        if (page_owner_slot == ARRAY_SIZE(g_ptebp_slots) && g_ptebp_slots[i].shadow_page) free_page((unsigned long)g_ptebp_slots[i].shadow_page);
-        memset(&g_ptebp_slots[i], 0, sizeof(g_ptebp_slots[i]));
-        break;
     }
 
-    // 全部成功才正式发布对外可见的 info
-    if (!status) g_ptebp_info = info;
+    if (!status)
+    {
+        // release 与两个异常入口的 acquire 配对，异常处理先于任何目标页变化就绪。
+        smp_store_release(&g_ptebp_info, info);
+
+        for (size_t i = 0; i < ARRAY_SIZE(g_ptebp_slots); i++)
+        {
+            struct ptebp_slot *slot = &g_ptebp_slots[i];
+            bool shared_page = false;
+
+            if (!slot->hook_addr) continue;
+            for (size_t j = 0; j < i; j++)
+                if (g_ptebp_slots[j].hook_addr && g_ptebp_slots[j].page_vaddr == slot->page_vaddr)
+                {
+                    shared_page = true;
+                    break;
+                }
+            if (shared_page) continue;
+
+            status = write_user_pte_value(mm, slot->page_vaddr, ptebp_make_data_guard_pte(pte_val(slot->orig_pte)));
+            if (status) break;
+        }
+    }
+
+    if (!status)
+    {
+        const uint32_t marker_inst = PTEBP_UDF_INST;
+
+        // guard 的 TLB 同步完成后再写 UDF，用户读取从一开始就使用原始影子页。
+        for (size_t i = 0; i < ARRAY_SIZE(g_ptebp_slots); i++)
+        {
+            if (!g_ptebp_slots[i].hook_addr) continue;
+            status = ptebp_write_inst(&g_ptebp_slots[i], &marker_inst);
+            if (status) break;
+        }
+    }
 
     spin_unlock_irqrestore(&g_ptebp_lock, flags);
     mmap_read_unlock(mm);

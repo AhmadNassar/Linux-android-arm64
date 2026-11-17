@@ -1,19 +1,19 @@
 {
   "upstream_repository": "https://github.com/lsnbm/Linux-android-arm64",
-  "upstream_commit": "587c3bdfa29b3523f79f5ce2bf6f3c1ac3087e51",
+  "upstream_commit": "df4ef96c90365c0ba7e638a8b7fadbe245c701f4",
   "project_import_commit": "79bf279",
   "old_archive_commit": "4eb532cb5163a204f54e0f5f0ba0b9edf3e2aed8",
   "preserved_upstream_sha256": {
     "android/jni/driver/driver.h": "8fd9346dc528389501cc203a66a0890c12ea4e7b07f4d0ed26a919fdcedfc35f",
     "android/jni/driver/driver_loader.h": "36a11273573964106fd8e80a6f40699be1a255f8e2f27d41d5f9054a1f8437e6",
     "lsdriver/io_version/io_struct.h": "ab71daa033cab06d84134671789ed01cf23086b71871dd934484a5dffc6c0ee4",
-    "lsdriver/io_version/version.h": "b680c2b79a5696321fa3fc1961c433ced652d728fcd70a003cd74b2dca1276d2",
+    "lsdriver/io_version/version.h": "d7b2bfa18555ec47bddeb5282d760518435c296360e2c036d20b1a17daf20f18",
     "lsdriver/hide_task.h": "96840772056d3d8cb118f605a62d0fd5145507df14b987592c6158dbe9c46d8b",
     "lsdriver/hide_kgsl.h": "7768d079f260cbbcf4f7fd4f3917b0cc8f837ce54cb035c10329c1cba090457c",
     "lsdriver/hide_proc.h": "bcbf8126e8115ff85f36ada0ceb6c961417e5805c0b1932554b4d311a24f96de",
     "lsdriver/arm64_ptedbg.h": "57a5519205a9720878d880faab929b04982a17ba5e72fcd70542c503a1a1fe88",
     "lsdriver/arm64_ptedbg-20260822-000439.h": "94821a3efeec4255c30ef00b3ce15f0f8fa01b5f9255033bc0cf4c8464c1c608"
   },
-  "previous_upstream_commit": "adef23a7e537efc937f01cfbbd44c3c7c33be216",
+  "previous_upstream_commit": "587c3bdfa29b3523f79f5ce2bf6f3c1ac3087e51",
   "cpu_render": "disabled-upstream"
 }

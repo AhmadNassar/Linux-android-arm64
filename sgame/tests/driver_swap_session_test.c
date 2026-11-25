@@ -23,6 +23,7 @@ struct task_struct {
 };
 struct request_obj { int user, kernel, status; char data[8192]; };
 struct page { int unused; };
+struct pid { int nr; };
 static struct request_obj *sgame_connected_req;
 static struct task_struct *volatile ls_process_task;
 static struct task_struct *processes;
@@ -45,6 +46,7 @@ static int g_syscall_monitor_pids[2], g_cntvct_monitor_tgid;
 #define FOLL_WRITE 1
 #define VM_MAP 0
 #define PAGE_KERNEL 0
+#define PIDTYPE_PID 0
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
 #define DEFINE_MUTEX(x) pthread_mutex_t x = PTHREAD_MUTEX_INITIALIZER
@@ -60,9 +62,16 @@ static int g_syscall_monitor_pids[2], g_cntvct_monitor_tgid;
 static void get_task_struct(struct task_struct *task) { ++task->refs; }
 static void put_task_struct(struct task_struct *task) { assert(task->refs > 0); --task->refs; }
 static void get_task_comm(char *comm, struct task_struct *task) { memcpy(comm, task->comm, 16); }
-static struct task_struct *get_task_by_pid(int pid) {
+static struct pid *find_vpid(int nr) {
+    static struct pid pid;
+    assert(rcu_depth > 0);
+    pid.nr = nr;
+    return &pid;
+}
+static struct task_struct *pid_task(struct pid *pid, int type) {
     struct task_struct *task;
-    for_each_process(task) if (task->pid == pid) { get_task_struct(task); return task; }
+    assert(rcu_depth > 0 && type == PIDTYPE_PID);
+    for_each_process(task) if (task->pid == pid->nr) return task;
     return NULL;
 }
 static struct mm_struct *get_task_mm(struct task_struct *task) {

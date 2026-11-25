@@ -7,7 +7,9 @@
  * In particular, it remains held while a swap request waits for backend I/O. */
 #ifndef SGAME_COMPAT_SESSION_TEST
 #include <linux/mutex.h>
+#include <linux/pid.h>
 #include <linux/rcupdate.h>
+#include <linux/sched/task.h>
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
 #define SGAME_SESSION_MODERN_GUP 1
@@ -68,9 +70,13 @@ static void sgame_cleanup_client(void)
 
 static bool sgame_target_dead(pid_t pid)
 {
-    struct task_struct *task = get_task_by_pid(pid);
+    struct task_struct *task;
     bool dead;
 
+    rcu_read_lock();
+    task = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if (task) get_task_struct(task);
+    rcu_read_unlock();
     if (!task) return true;
     dead = atomic_read(&task->signal->live) == 0;
     put_task_struct(task);

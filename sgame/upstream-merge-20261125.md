@@ -30,3 +30,10 @@ fixtures cover each reviewed API family, including reference balancing and
 large-folio tail reads. PTE, simulation and source-policy checks also pass.
 Kernel compilation and device validation are separate from these host checks;
 each resulting module receives its own source record and build metadata.
+
+The first 5.10 and 6.1 module compilations exposed an upstream helper removal:
+the retained session reaper still called `get_task_by_pid`. The project session
+now resolves the PID under RCU and acquires its own task reference before leaving
+the read-side section. Existing session fixtures exercise missing, live and dead
+targets and confirm references are balanced. No breakpoint source changes are
+needed for this build fix.

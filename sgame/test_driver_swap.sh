@@ -5,15 +5,25 @@ cd "$(dirname "$0")/.."
 mkdir -p build/tests
 compiler="${CC:-cc}"
 flags=(-std=gnu11 -fsanitize=address,undefined -g)
-for variant in 510-4k 61-4k 612-4k 612-16k; do
+for variant in 510-4k 515-4k 61-4k 66-4k 612-4k 612-16k 618-4k; do
     reader_flags=()
     session_flags=()
     if [[ "$variant" == 510-* ]]; then
+        reader_flags+=(-DSGAME_SWAP_LEGACY=1 -DSGAME_SWAP_DEVICE_RCU=1)
+    fi
+    if [[ "$variant" == 515-* ]]; then
         reader_flags+=(-DSGAME_SWAP_LEGACY=1)
     fi
-    if [[ "$variant" == 612-* ]]; then
+    if [[ "$variant" == 66-* ]]; then
+        reader_flags+=(-DSGAME_SWAP_FOLIO_ENTRY=1)
+        session_flags+=(-DSGAME_SESSION_MODERN_GUP=1)
+    fi
+    if [[ "$variant" == 612-* || "$variant" == 618-* ]]; then
         reader_flags+=(-DSGAME_SWAP_MODERN=1)
         session_flags+=(-DSGAME_SESSION_MODERN_GUP=1)
+    fi
+    if [[ "$variant" == 618-* ]]; then
+        reader_flags+=(-DSGAME_SWAP_TABLE=1)
     fi
     if [[ "$variant" == *-16k ]]; then
         reader_flags+=(-DPAGE_SHIFT=14)

@@ -1,4 +1,4 @@
-/* Execute the production reader with deterministic 5.10 / 6.1 / 6.12 API shims.
+/* Execute the production reader with deterministic reviewed Android API shims.
  * This tests lifetime/lock/error behavior; it does not replace a device test. */
 #include <assert.h>
 #include <errno.h>
@@ -11,6 +11,12 @@
 #define SGAME_SWAP_TEST
 #ifndef SGAME_SWAP_LEGACY
 #define SGAME_SWAP_LEGACY 0
+#endif
+#ifndef SGAME_SWAP_DEVICE_RCU
+#define SGAME_SWAP_DEVICE_RCU 0
+#endif
+#ifndef SGAME_SWAP_TABLE
+#define SGAME_SWAP_TABLE 0
 #endif
 #define MODULE_INFO(k, v)
 #define UTS_RELEASE "test"
@@ -181,7 +187,7 @@ static void kunmap(struct page *p) { (void)p; }
 static void put_page(struct page *p) { assert(!p->folio->locked); assert(p->refs > 0); --p->refs; }
 static void put_swap_device(struct swap_info_struct *si) {
     assert(si->refs > 0); --si->refs;
-    if (SGAME_SWAP_LEGACY) { rcu_read_unlock(); }
+    if (SGAME_SWAP_DEVICE_RCU) { rcu_read_unlock(); }
 }
 enum {
     NO_SWAP_FREE = 1,
@@ -197,7 +203,7 @@ static unsigned long generic_kallsyms_lookup_name(const char *name);
 
 static struct swap_info_struct *get_device(swp_entry_t e) {
     (void)e; assert(spin_depth); if (missing_device) return NULL;
-    if (SGAME_SWAP_LEGACY) rcu_read_lock();
+    if (SGAME_SWAP_DEVICE_RCU) rcu_read_lock();
     ++device.refs; return &device;
 }
 static int duplicate(swp_entry_t e) {
@@ -209,7 +215,7 @@ static void release_slot(swp_entry_t e, unsigned int api) {
         !(unavailable_symbols & NO_FREE_AND_CACHE_NR) ? NO_FREE_AND_CACHE_NR : NO_FREE_AND_CACHE;
     (void)e; assert(api == expected);
     assert(!spin_depth && !rcu_depth && slot_refs > 0);
-    assert(SGAME_SWAP_LEGACY ? !device.refs : device.refs > 0); --slot_refs;
+    assert(SGAME_SWAP_DEVICE_RCU ? !device.refs : device.refs > 0); --slot_refs;
 }
 static void free_entry(swp_entry_t e) { release_slot(e, NO_SWAP_FREE); }
 static void free_nr(swp_entry_t e, int nr_pages) {
@@ -223,11 +229,16 @@ static int free_and_cache(swp_entry_t e) {
 }
 #if SGAME_SWAP_LEGACY
 static struct page *cache_get(swp_entry_t e, struct vm_area_struct *v, unsigned long a) {
+#elif SGAME_SWAP_TABLE
+static struct folio *cache_get(swp_entry_t e) {
 #else
 static struct folio *cache_get(swp_entry_t e, struct vm_area_struct *v, unsigned long a) {
 #endif
-    (void)v; (void)a; assert(!spin_depth && !rcu_depth); assert(slot_refs);
-    assert(SGAME_SWAP_LEGACY ? !device.refs : device.refs > 0); ++cache_calls;
+#if !SGAME_SWAP_TABLE
+    (void)v; (void)a;
+#endif
+    assert(!spin_depth && !rcu_depth); assert(slot_refs);
+    assert(SGAME_SWAP_DEVICE_RCU ? !device.refs : device.refs > 0); ++cache_calls;
     if (!hit) return NULL;
     ++pages[e.val].refs;
 #if SGAME_SWAP_LEGACY
@@ -247,7 +258,7 @@ static struct page *read_async(swp_entry_t e, gfp_t g, struct vm_area_struct *v,
     assert(!plug);
 #endif
     (void)g; (void)v; (void)a; assert(!spin_depth && !rcu_depth); ++backend_calls;
-    assert(slot_refs); assert(SGAME_SWAP_LEGACY ? !device.refs : device.refs > 0);
+    assert(slot_refs); assert(SGAME_SWAP_DEVICE_RCU ? !device.refs : device.refs > 0);
     if (missing_page) return NULL;
     ++pages[e.val].refs;
 #if SGAME_SWAP_MODERN
@@ -388,10 +399,10 @@ int main(void) {
         assert(sgame_swap_read(&test_mm, TEST_BASE, out, sizeof(out)) == sizeof(out));
         assert(out[0] == 3 && cache_calls == 1 && backend_calls == !from_cache); clean();
     }
-    puts("PASS: 5.10 compound-page tails from cache/backend retain the exact slot and head lock");
+    puts("PASS: page API compound tails from cache/backend retain the exact slot and head lock");
 #endif
 
-#if SGAME_SWAP_MODERN
+#if SGAME_SWAP_FOLIO_ENTRY
     u8 out[8];
     reset(); make_resident(0, 2); replace_table_at = 1;
     assert(sgame_swap_read(&test_mm, TEST_BASE, out, sizeof(out)) == sizeof(out));
@@ -402,14 +413,18 @@ int main(void) {
     reset(); make_swap(0, 3); during_wait = remove_table;
     assert(sgame_swap_read(&test_mm, TEST_BASE, out, sizeof(out)) == -EFAULT);
     assert(sgame_swap_stats.retries == 1); clean();
+#endif
+
+#if SGAME_SWAP_FOLIO_ENTRY
+    u8 large_out[8];
     for (int from_cache = 0; from_cache < 2; ++from_cache) {
         reset(); make_swap(0, 3); hit = from_cache;
         folios[2].nr_pages = 2; pages[3].folio = &folios[2];
-        pages[3].private = 0; /* 6.12 has no per-tail private swap entry. */
-        assert(sgame_swap_read(&test_mm, TEST_BASE, out, sizeof(out)) == sizeof(out));
-        assert(out[0] == 3 && cache_calls == 1 && backend_calls == !from_cache); clean();
+        pages[3].private = 0; /* 6.6+ has no per-tail private swap entry. */
+        assert(sgame_swap_read(&test_mm, TEST_BASE, large_out, sizeof(large_out)) == sizeof(large_out));
+        assert(large_out[0] == 3 && cache_calls == 1 && backend_calls == !from_cache); clean();
     }
-    puts("PASS: 6.12 PTE table replacement/removal and large-folio tail reads from cache/backend");
+    puts("PASS: base folio swap entry validates large-folio tails from cache/backend");
 #endif
 
     memset(&sgame_swap_api, 0, sizeof(sgame_swap_api));
@@ -421,6 +436,8 @@ int main(void) {
     assert(sgame_swap_init() == -ENOENT);
     clean();
     printf("driver_swap_test: API=%s cached/NC=%d: 105 reader cases + 2 initialization failures passed (balanced references, no RCU across I/O)\n",
-           SGAME_SWAP_LEGACY ? "5.10-page" : SGAME_SWAP_MODERN ? "6.12-folio" : "6.1-folio", SGAME_READ_NC);
+           SGAME_SWAP_LEGACY ? (SGAME_SWAP_DEVICE_RCU ? "5.10-page-RCU" : "5.15-page-ref") :
+           SGAME_SWAP_TABLE ? "6.18-swap-table" : SGAME_SWAP_MODERN ? "6.12-folio" :
+           SGAME_SWAP_FOLIO_ENTRY ? "6.6-folio" : "6.1-folio", SGAME_READ_NC);
     return 0;
 }

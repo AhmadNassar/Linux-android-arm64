@@ -24,6 +24,7 @@ static void sgame_core_exit(void)
     sgame_stop_thread(&connect_thread_task);
     sgame_stop_thread(&dispatch_thread_task);
     sgame_cleanup_client();
+    signal_unregister();
     inline_hook_remove_all();
     if (sgame_physical_ready) {
         free_physical_page_info();
@@ -75,6 +76,9 @@ static int sgame_core_init(int (*connect_fn)(void *), int (*dispatch_fn)(void *)
     stage = "exit-hooks";
     status = do_exit_init();
     if (status < 0) goto fail;
+    status = signal_register();
+    if (status < 0)
+        ls_log_always_tag("LS", "注册 signal_generate 诊断失败，错误码: %d\n", status);
 
     /* CPU rendering remains disconnected, matching upstream's lifecycle. */
     sched_set_fifo_low(connect_thread_task);

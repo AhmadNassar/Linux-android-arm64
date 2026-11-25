@@ -18,9 +18,12 @@
 #include <generated/utsrelease.h>
 
 #if !((LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)) || \
+      (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)) || \
       (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)) || \
-      (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)))
-#error "sgame swap supports the reviewed Android 5.10, 6.1 and 6.12 APIs"
+      (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)) || \
+      (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)) || \
+      (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)))
+#error "sgame swap supports the reviewed Android 5.10, 5.15, 6.1, 6.6, 6.12 and 6.18 APIs"
 #endif
 #ifndef CONFIG_SWAP
 #error "sgame swap requires CONFIG_SWAP"
@@ -28,8 +31,12 @@
 #endif
 
 #ifndef SGAME_SWAP_LEGACY
-#if !defined(SGAME_SWAP_TEST) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+#ifndef SGAME_SWAP_TEST
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
 #define SGAME_SWAP_LEGACY 1
+#else
+#define SGAME_SWAP_LEGACY 0
+#endif
 #else
 #define SGAME_SWAP_LEGACY 0
 #endif
@@ -47,7 +54,43 @@
 #endif
 #endif
 
-#define SGAME_SWAP_VERSION "1.2.0"
+#ifndef SGAME_SWAP_DEVICE_RCU
+#ifndef SGAME_SWAP_TEST
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+#define SGAME_SWAP_DEVICE_RCU 1
+#else
+#define SGAME_SWAP_DEVICE_RCU 0
+#endif
+#else
+#define SGAME_SWAP_DEVICE_RCU 0
+#endif
+#endif
+
+#ifndef SGAME_SWAP_FOLIO_ENTRY
+#ifndef SGAME_SWAP_TEST
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define SGAME_SWAP_FOLIO_ENTRY 1
+#else
+#define SGAME_SWAP_FOLIO_ENTRY SGAME_SWAP_MODERN
+#endif
+#else
+#define SGAME_SWAP_FOLIO_ENTRY SGAME_SWAP_MODERN
+#endif
+#endif
+
+#ifndef SGAME_SWAP_TABLE
+#ifndef SGAME_SWAP_TEST
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define SGAME_SWAP_TABLE 1
+#else
+#define SGAME_SWAP_TABLE 0
+#endif
+#else
+#define SGAME_SWAP_TABLE 0
+#endif
+#endif
+
+#define SGAME_SWAP_VERSION "1.3.0"
 #define SGAME_SWAP_ATTEMPTS 3
 MODULE_INFO(sgame_swap, SGAME_SWAP_VERSION);
 
@@ -64,7 +107,11 @@ static struct {
     struct page *(*read_async)(swp_entry_t entry, gfp_t mask, struct vm_area_struct *vma,
                                unsigned long addr, bool do_poll);
 #else
+#if SGAME_SWAP_TABLE
+    struct folio *(*cache_get)(swp_entry_t entry);
+#else
     struct folio *(*cache_get)(swp_entry_t entry, struct vm_area_struct *vma, unsigned long addr);
+#endif
 #if SGAME_SWAP_MODERN
     struct folio *(*read_async)(swp_entry_t entry, gfp_t mask, struct vm_area_struct *vma,
 #else
@@ -209,13 +256,13 @@ static int sgame_swap_copy_resident(unsigned long pfn, unsigned long addr,
 #endif
 }
 
-/* 6.12 can remove a PTE table under mmap_read_lock. Follow its RCU + parent
+/* 6.6+ can remove a PTE table under mmap_read_lock. Follow its RCU + parent
  * recheck protocol, using arm64's lowmem tables without importing helpers
  * outside the GKI KMI. No RCU section or PTL survives a blocking swap read. */
 static pte_t *sgame_swap_pte_lock(struct mm_struct *mm, pmd_t *pmd,
                                  unsigned long addr, spinlock_t **ptlp)
 {
-#if SGAME_SWAP_MODERN
+#if SGAME_SWAP_FOLIO_ENTRY
     pmd_t value;
     pte_t *pte;
     spinlock_t *ptl;
@@ -243,7 +290,7 @@ static pte_t *sgame_swap_pte_lock(struct mm_struct *mm, pmd_t *pmd,
 
 static void sgame_swap_pte_unlock(pte_t *pte, spinlock_t *ptl)
 {
-#if SGAME_SWAP_MODERN
+#if SGAME_SWAP_FOLIO_ENTRY
     (void)pte;
     spin_unlock(ptl);
     rcu_read_unlock();
@@ -319,7 +366,7 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
      * swap_duplicate may allocate only with GFP_ATOMIC on count overflow. */
     si = sgame_swap_api.get_device(entry);
     status = si ? sgame_swap_api.duplicate(entry) : -EAGAIN;
-#if SGAME_SWAP_LEGACY
+#if SGAME_SWAP_DEVICE_RCU
     /* 5.10 get_swap_device() holds RCU, not a sleepable percpu reference.
      * The duplicated slot keeps inuse_pages nonzero and prevents swapoff's
      * try_to_unuse() from finishing. Drop RCU before any blocking work. */
@@ -345,7 +392,11 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
         page = sgame_swap_api.read_async(entry, GFP_HIGHUSER_MOVABLE, vma, addr, false);
     }
 #else
+#if SGAME_SWAP_TABLE
+    folio = sgame_swap_api.cache_get(entry);
+#else
     folio = sgame_swap_api.cache_get(entry, vma, addr);
+#endif
     if (folio) {
         ++sgame_swap_stats.hits;
         page = folio_file_page(folio, swp_offset(entry));
@@ -384,8 +435,8 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
 #else
     if (!folio_test_swapcache(folio)) goto out_folio;
 #endif
-#if SGAME_SWAP_MODERN
-    /* 6.12 stores one base entry in the head folio, including large folios;
+#if SGAME_SWAP_FOLIO_ENTRY
+    /* 6.6+ stores one base entry in the head folio, including large folios;
      * tail page->private no longer contains its individual swap entry. */
     if (folio->swap.val + folio_page_idx(folio, page) != entry.val) goto out_folio;
 #else

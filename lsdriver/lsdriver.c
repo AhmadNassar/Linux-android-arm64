@@ -3,7 +3,8 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
-#include <linux/sched/task_stack.h>
+#include <linux/stacktrace.h>
+#include <trace/events/signal.h>
 #include <linux/atomic.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/kthread.h>
@@ -51,6 +52,55 @@ struct task_struct *volatile ls_process_task = ...; // 正确：指针变量本�
 struct task_struct *volatile connect_thread_task = 0;
 struct task_struct *volatile dispatch_thread_task = 0;
 struct task_struct *volatile ls_process_task = 0;
+
+// 请求页检查前记录候选身份；PID 和启动时间一起标识实例，避免 PID 复用误判。
+static void log_connect_candidate(pid_t tgid, unsigned long long start, struct mm_struct *mm)
+{
+    char comm[TASK_COMM_LEN], parent_comm[TASK_COMM_LEN], parent_thread[TASK_COMM_LEN];
+    pid_t ppid = 0, parent_tid = 0;
+    unsigned long long parent_start = 0;
+    unsigned int flags, uid;
+    bool same_mm;
+
+    rcu_read_lock();
+    struct task_struct *candidate = pid_task(find_vpid(tgid), PIDTYPE_PID);
+    if (!candidate || READ_ONCE(candidate->start_time) != start)
+    {
+        rcu_read_unlock();
+        ls_log_always_tag("LS", "stage=connect_candidate new_tgid=%d new_start=%llu identity=gone_or_reused\n", tgid, start);
+        return;
+    }
+    get_task_comm(comm, candidate);
+    flags = READ_ONCE(candidate->flags);
+    uid = __kuid_val(task_uid(candidate));
+    same_mm = READ_ONCE(candidate->mm) == mm;
+    struct task_struct *parent = rcu_dereference(candidate->real_parent);
+    if (parent)
+    {
+        parent_tid = parent->pid;
+        ppid = parent->tgid;
+        struct task_struct *leader = READ_ONCE(parent->group_leader);
+        parent_start = READ_ONCE(leader->start_time);
+        get_task_comm(parent_comm, leader);
+        get_task_comm(parent_thread, parent);
+    }
+    rcu_read_unlock();
+
+    // 使用候选进程的 mm 引用；取代码段所在文件，不把继承的映像当作子进程即将执行的命令。
+    char buf[256];
+    const char *image = "<no-file>";
+    mmap_read_lock(mm);
+    unsigned long code = READ_ONCE(mm->start_code);
+    struct vm_area_struct *vma = find_vma(mm, code);
+    if (code && vma && vma->vm_start <= code && vma->vm_file)
+    {
+        image = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
+        if (IS_ERR(image)) image = "<path-unavailable>";
+    }
+    mmap_read_unlock(mm);
+
+    ls_log_always_tag("LS", "stage=connect_candidate new_tgid=%d new_start=%llu comm=%s uid=%u fork_no_exec=%u same_mm=%u ppid=%d parent_start=%llu parent_comm=%s parent_tid=%d parent_thread=%s code_image=%s\n", tgid, start, comm, uid, !!(flags & PF_FORKNOEXEC), same_mm, ppid, parent_start, ppid ? parent_comm : "<none>", parent_tid, ppid ? parent_thread : "<none>", image);
+}
 
 #include "sgame_session.h"
 static void sgame_request_shutdown(void);
@@ -454,6 +504,70 @@ static int do_exit_hook_work(struct pt_regs *regs)
     return 0;
 }
 
+static struct tracepoint *signal_tp;
+
+// 记录发往 LS 的 SIGKILL，用同一事件号关联入队结果和发送方调用栈。
+static void signal_generate(void *data, int sig, struct kernel_siginfo *info, struct task_struct *task, int group, int result)
+{
+    if (sig != SIGKILL) return;
+
+    // 发送路径已持有目标 sighand->siglock。按组长名匹配，也覆盖发给 Binder 线程的信号。
+    struct task_struct *leader = READ_ONCE(task->group_leader);
+    char comm[TASK_COMM_LEN];
+    __builtin_memcpy(comm, leader->comm, sizeof(comm));
+    if (__builtin_memcmp(comm, "LS", sizeof("LS")) != 0) return;
+
+    static const char *const results[] = {
+        [TRACE_SIGNAL_DELIVERED] = "queued", [TRACE_SIGNAL_IGNORED] = "ignored", [TRACE_SIGNAL_ALREADY_PENDING] = "already_pending", [TRACE_SIGNAL_OVERFLOW_FAIL] = "overflow", [TRACE_SIGNAL_LOSE_INFO] = "lost_info",
+    };
+    static atomic64_t sequence = ATOMIC64_INIT(0);
+    unsigned long long event = atomic64_inc_return(&sequence);
+    // 两个 SEND_SIG_* 哨兵值直接映射到 si_code，只有实际的 siginfo 指针才能解引用。
+    int code = info == SEND_SIG_NOINFO ? SI_USER : info == SEND_SIG_PRIV ? SI_KERNEL : info->si_code;
+    const char *outcome = (unsigned int)result < ARRAY_SIZE(results) ? results[result] : "unknown";
+    ls_log_always_tag("LS", "stage=signal_generate event=%llu signal=SIGKILL(9) result=%s(%d) si_code=%d group=%d tgid=%d process_start=%llu target_tid=%d target_comm=%.*s sender_tgid=%d sender_tid=%d sender_comm=%.*s context=%s\n", event, outcome, result, code, group, task->tgid, (unsigned long long)READ_ONCE(leader->start_time), task->pid, TASK_COMM_LEN, task->comm, current->tgid, current->pid, TASK_COMM_LEN, current->comm, in_task() ? "task" : "interrupt");
+    // 仅在本次信号成功入队时采集发送栈，重复发送仍会留下上面的摘要。
+    if (result == TRACE_SIGNAL_DELIVERED)
+    {
+        unsigned long frames[16];
+        unsigned int count = stack_trace_save(frames, ARRAY_SIZE(frames), 0);
+        for (unsigned int i = 0; i < count; i++) ls_log_always_tag("LS", "event=%llu sender_frame=%u %pS\n", event, i, (void *)frames[i]);
+    }
+}
+
+// 遍历时按名称匹配，通过 data 把观测点指针写回调用者。
+static void find_signal_tp(struct tracepoint *tp, void *data)
+{
+    // data 是注册函数传入的 &tp，命中后写入该局部变量。
+    if (__builtin_strcmp(tp->name, "signal_generate") == 0) *(struct tracepoint **)data = tp;
+}
+
+// 注册信号回调
+static int signal_register(void)
+{
+    struct tracepoint *tp = NULL;
+    for_each_kernel_tracepoint(find_signal_tp, &tp);
+    if (!tp) return -ENOENT;
+
+    // 用事件原型在编译期检查回调签名，再通过通用接口注册。
+    check_trace_callback_type_signal_generate(signal_generate);
+    int ret = tracepoint_probe_register(tp, signal_generate, NULL);
+    if (!ret) WRITE_ONCE(signal_tp, tp);
+    return ret;
+}
+
+// 卸载信号回调
+static void signal_unregister(void)
+{
+    struct tracepoint *tp = xchg(&signal_tp, NULL);
+    if (tp)
+    {
+        tracepoint_probe_unregister(tp, signal_generate, NULL);
+        // 等待其他 CPU 上已经进入的回调返回。
+        tracepoint_synchronize_unregister();
+    }
+}
+
 /*
 taskstats_exit(group_dead=true)
     -> 确认最后线程退出，整个进程生命周期结束
@@ -466,6 +580,16 @@ static int taskstats_exit_hook_work(struct pt_regs *regs)
      * retained, but sleeping cleanup and hook removal belong to the connection
      * thread, which also serializes with an in-flight Swap request. */
     if (regs->regs[1] && task) {
+        char comm[TASK_COMM_LEN];
+
+        get_task_comm(comm, task->group_leader);
+        if (!strcmp(comm, "LS")) {
+            unsigned int status = READ_ONCE(task->signal->flags) & SIGNAL_GROUP_EXIT ?
+                READ_ONCE(task->signal->group_exit_code) : READ_ONCE(task->group_leader->exit_code);
+            ls_log_always_tag("LS", "stage=process_exit tgid=%d process_start=%llu wait_status=0x%x signal=%u exit_status=%u\n",
+                              task->tgid, (unsigned long long)READ_ONCE(task->group_leader->start_time),
+                              status, status & 0x7f, (status >> 8) & 0xff);
+        }
         WRITE_ONCE(sgame_exit_event, true);
         if (READ_ONCE(connect_thread_task)) wake_up_process(connect_thread_task);
     }
@@ -570,7 +694,7 @@ static void hide_myself(void)
 
     // 摘除链表，/proc/modules 中不可见。
     list_del_init(&THIS_MODULE->list);
-    // 摘除kobj，/sys/modules/中不可见。
+    // 摘除kobj，/sys/module/中不可见。
     kobject_del(&THIS_MODULE->mkobj.kobj);
 
     /*
@@ -697,5 +821,7 @@ KMI:
 
     所以说不能只看函数和变量在源码中是否用 EXPORT_SYMBOL 导出了就使用，还要看KMI符号规则表
 
-
-    */
+KGSL:
+    KGSL 常放在独立的厂商模块目录：kernel/msm-modules/graphics或vendor/qcom/opensource/graphics-kernel/
+    不在 GKI 的 common 源码里，
+*/

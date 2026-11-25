@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/pid.h>
+#include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
@@ -72,11 +73,7 @@ paciasp              // 既可作为 BTI landing pad，又用 SP 给 LR 签名
 stp x29, x30, [sp, #-...]! //不能直接patch为ret
 ...
 
-入口指令	满足 BTI 入口检查	给返回地址签名
-PACIASP	        可以	            会
-BTI c	        可以	            不会
-LDR X16, ...	不可以	            不会
-所以 PACIASP 一条指令承担了两种作用：返回地址签名，以及充当合法入口。
+PACIASP 承担了两种作用：返回地址签名，以及充当合法入口。
 
 */
 
@@ -128,20 +125,20 @@ __attribute__((no_sanitize("cfi", "kcfi"))) static inline int bypass_cfi(void)
     };
 
     /*
-      2026/7/25 22:23实机测试 修复
-      不同cfi函数不同序言
-      统一把入口patch 为
-      bti c
-      ret
-      消除bti c 和pac认证的2者差异
+    2026/7/25 22:23实机测试 修复
+    不同cfi函数不同序言
+    统一把入口patch 为
+    bti jc
+    ret
+    消除bti c 和pac认证的2者差异
     */
     void *patch_addrs[ARRAY_SIZE(cfi_symbols) * 2];
     uint32_t patch_insts[ARRAY_SIZE(cfi_symbols) * 2];
-    uint32_t bti_c_inst;
+    uint32_t bti_jc_inst;
     uint32_t ret_inst;
     int patch_count = 0;
 
-    status = arm64_encode_bti_c(&bti_c_inst);
+    status = arm64_encode_bti_jc(&bti_jc_inst);
     if (status < 0) return status;
 
     status = arm64_encode_ret(30, &ret_inst);
@@ -154,7 +151,7 @@ __attribute__((no_sanitize("cfi", "kcfi"))) static inline int bypass_cfi(void)
         if (!cfi_addr) continue;
 
         patch_addrs[patch_count] = (void *)cfi_addr;                      // 补丁地址：CFI 函数入口。
-        patch_insts[patch_count++] = bti_c_inst;                          // 补丁指令：BTI C；记录完成后 patch_count 加 1。
+        patch_insts[patch_count++] = bti_jc_inst;                         // 补丁指令：BTI JC；记录完成后 patch_count 加 1。
         patch_addrs[patch_count] = (void *)(cfi_addr + sizeof(uint32_t)); // 补丁地址：函数入口后的下一条 ARM64 指令，即入口加 4 字节。
         patch_insts[patch_count++] = ret_inst;                            // 补丁指令：RET X30；记录完成后 patch_count 加 1。
     }
@@ -352,25 +349,14 @@ static inline bool user_range_writable(struct mm_struct *mm, uint64_t address, s
     return user_page_writable(mm, last_page);
 }
 
-// 根据 pid 获取 task_struct，调用方负责 put_task_struct。
-static inline struct task_struct *get_task_by_pid(pid_t pid)
-{
-    struct pid *pid_struct = find_get_pid(pid);
-    if (!pid_struct) return NULL;
-
-    struct task_struct *task = get_pid_task(pid_struct, PIDTYPE_PID);
-    put_pid(pid_struct);
-    return task;
-}
-
 // 根据 pid 获取 mm_struct，调用方负责 mmput。
 static inline struct mm_struct *get_mm_by_pid(pid_t pid)
 {
-    struct task_struct *task = get_task_by_pid(pid);
-    if (!task) return NULL;
+    rcu_read_lock();
+    struct task_struct *task = find_task_by_vpid(pid);
+    struct mm_struct *mm = task ? get_task_mm(task) : NULL;
+    rcu_read_unlock();
 
-    struct mm_struct *mm = get_task_mm(task);
-    put_task_struct(task);
     return mm;
 }
 
@@ -469,7 +455,7 @@ static inline int write_user_pte_value(struct mm_struct *mm, uint64_t addr, ptev
 
 // 分配页对齐的内核 RWX 内存；fixed_address 为 NULL 时随机分配，否则必须传入希望占用的页对齐虚拟地址。
 // size 会向上取整到整页；固定地址已占用或无效时返回 NULL。写入机器码后、首次执行前仍须同步缓存。
-static void *execmem_alloc(void *fixed_address, size_t size)
+__attribute__((no_sanitize("cfi", "kcfi"))) static void *execmem_alloc(void *fixed_address, size_t size)
 {
     if (!size || size > SIZE_MAX - (PAGE_SIZE - 1)) return NULL;
 

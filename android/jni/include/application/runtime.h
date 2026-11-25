@@ -1,11 +1,13 @@
 #pragma once
 #include <atomic>
 #include <cerrno>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
+#include <string_view>
 
-#include "../../android_draw/vulkan_imgui_renderer.h"
 #include "../../driver/driver.h"
 #include "../base/config.h"
 #include "../memory/mem_scanner.h"
@@ -16,166 +18,197 @@
 class ApplicationRuntime
 {
 public:
-    class ProcessMonitor
-    {
-    public:
-        enum class Kind
-        {
-            Syscall,
-            Cntvct
-        };
-
-    private:
-        Driver &driver_;
-        Kind kind_;
-        std::mutex mutex_;
-        std::atomic_int pid_{0};
-
-    public:
-        ProcessMonitor(Driver &driver, Kind kind) : driver_(driver), kind_(kind)
-        {
-        }
-
-        int start()
-        {
-            std::lock_guard lock(mutex_);
-            const int targetPid = driver_.GetGlobalPid();
-            if (targetPid <= 0) return EINVAL;
-
-            const int monitoredPid = pid_.load(std::memory_order_acquire);
-            if (monitoredPid == targetPid) return 0;
-            if (monitoredPid > 0)
-            {
-                const int status = kind_ == Kind::Syscall ? driver_.StopSyscallMonitor(monitoredPid) : driver_.StopCntvctMonitor(monitoredPid);
-                if (status != 0) return status;
-                pid_.store(0, std::memory_order_release);
-            }
-
-            const int status = kind_ == Kind::Syscall ? driver_.StartSyscallMonitor(targetPid) : driver_.StartCntvctMonitor(targetPid);
-            if (status == 0) pid_.store(targetPid, std::memory_order_release);
-            return status;
-        }
-
-        int stop()
-        {
-            std::lock_guard lock(mutex_);
-            const int monitoredPid = pid_.load(std::memory_order_acquire);
-            if (monitoredPid <= 0) return 0;
-
-            const int status = kind_ == Kind::Syscall ? driver_.StopSyscallMonitor(monitoredPid) : driver_.StopCntvctMonitor(monitoredPid);
-            if (status == 0) pid_.store(0, std::memory_order_release);
-            return status;
-        }
-
-        int monitoredPid() const noexcept
-        {
-            return pid_.load(std::memory_order_acquire);
-        }
-    };
-
-    class ResourceSet
-    {
-    private:
-        Driver &driver_;
-
-    public:
-        MemScanner<Driver> scanner;
-        MemViewer viewer;
-        PointerManager pointer;
-        SavedAddressManager saved;
-        std::string hwbpMode;
-        ProcessMonitor syscallMonitor;
-        ProcessMonitor cntvctMonitor;
-
-        explicit ResourceSet(Driver &driver) : driver_(driver), scanner(driver), syscallMonitor(driver, ProcessMonitor::Kind::Syscall), cntvctMonitor(driver, ProcessMonitor::Kind::Cntvct)
-        {
-        }
-
-        ResourceSet(const ResourceSet &) = delete;
-        ResourceSet &operator=(const ResourceSet &) = delete;
-
-        int startSyscallMonitor()
-        {
-            std::lock_guard targetLock(Config::TargetMutex);
-            return syscallMonitor.start();
-        }
-
-        int startCntvctMonitor()
-        {
-            std::lock_guard targetLock(Config::TargetMutex);
-            return cntvctMonitor.start();
-        }
-
-        bool selectTarget(int pid)
-        {
-            std::lock_guard targetLock(Config::TargetMutex);
-            if (pid <= 0) return false;
-            if (pid == driver_.GetGlobalPid()) return true;
-            if (scanner.isScanning() || pointer.isBusy()) return false;
-            if (syscallMonitor.stop() != 0 || cntvctMonitor.stop() != 0) return false;
-
-            if (hwbpMode == "hwbp") driver_.RemoveProcessHwbpRef();
-            else if (hwbpMode == "ptebp") driver_.RemoveProcessPtebpRef();
-            else if (hwbpMode == "dptbp") driver_.RemoveProcessDptbpRef();
-            else if (hwbpMode == "stepbp") driver_.RemoveProcessStepbpRef();
-
-            hwbpMode.clear();
-            saved.clear();
-            scanner.clear();
-            viewer.clear();
-            pointer.clear();
-            driver_.SetGlobalPid(pid);
-            return true;
-        }
-
-        ~ResourceSet()
-        {
-            syscallMonitor.stop();
-            cntvctMonitor.stop();
-        }
-    };
+    enum class Monitor { Syscall, Cntvct };
 
 private:
-    Config::ThreadPools threadPools_;
-    std::unique_ptr<ResourceSet> resources_;
-    bool graphicsInitialized_ = false;
+    enum class Breakpoint { None, Hardware, Pte, Dpt, Step };
+    std::atomic<Breakpoint> breakpoint_{Breakpoint::None};
+    std::atomic_int monitorPids_[2]{};
+    std::mutex monitorMutex_;
+    std::atomic_bool dumping_{false};
+    std::atomic_int dumpStatus_{0};
+    std::future<void> dumpTask_;
 
-public:
-    explicit ApplicationRuntime(Driver &driver)
+    // 调用者持有 TargetMutex，移除与模式提交不会被目标切换打断。
+    void removeBreakpoints()
     {
-        try
+        switch (breakpoint_.load(std::memory_order_acquire))
         {
-            Config::InstallThreadPools(threadPools_);
-            resources_ = std::make_unique<ResourceSet>(driver);
+        case Breakpoint::Hardware: dr->RemoveProcessHwbpRef(); break;
+        case Breakpoint::Pte: dr->RemoveProcessPtebpRef(); break;
+        case Breakpoint::Dpt: dr->RemoveProcessDptbpRef(); break;
+        case Breakpoint::Step: dr->RemoveProcessStepbpRef(); break;
+        case Breakpoint::None: break;
         }
-        catch (...)
-        {
-            Config::UninstallThreadPools(threadPools_);
-            threadPools_.shutdown();
-            throw;
-        }
+        breakpoint_.store(Breakpoint::None, std::memory_order_release);
     }
 
+public:
+    ApplicationRuntime() = default;
     ApplicationRuntime(const ApplicationRuntime &) = delete;
     ApplicationRuntime &operator=(const ApplicationRuntime &) = delete;
 
+    int startMonitor(Monitor kind)
+    {
+        int status = 0;
+        std::lock_guard targetLock(Config::TargetMutex);
+        std::lock_guard lock(monitorMutex_);
+        const int targetPid = dr->GetGlobalPid();
+        if (targetPid <= 0) return status = -EINVAL;
+        const int previous = monitorPids_[static_cast<size_t>(kind)].load(std::memory_order_acquire);
+        if (previous == targetPid) return status;
+        if (previous > 0)
+        {
+            status = kind == Monitor::Syscall ? dr->StopSyscallMonitor(previous) : dr->StopCntvctMonitor(previous);
+            if (status != 0) return status;
+            monitorPids_[static_cast<size_t>(kind)].store(0, std::memory_order_release);
+        }
+        status = kind == Monitor::Syscall ? dr->StartSyscallMonitor(targetPid) : dr->StartCntvctMonitor(targetPid);
+        if (status != 0) return status;
+        monitorPids_[static_cast<size_t>(kind)].store(targetPid, std::memory_order_release);
+        return status;
+    }
+
+    int stopMonitor(Monitor kind)
+    {
+        int status = 0;
+        std::lock_guard lock(monitorMutex_);
+        const int pid = monitorPids_[static_cast<size_t>(kind)].load(std::memory_order_acquire);
+        if (pid <= 0) return status;
+        status = kind == Monitor::Syscall ? dr->StopSyscallMonitor(pid) : dr->StopCntvctMonitor(pid);
+        if (status != 0) return status;
+        monitorPids_[static_cast<size_t>(kind)].store(0, std::memory_order_release);
+        return status;
+    }
+
+    int monitoredPid(Monitor kind) const noexcept
+    {
+        return monitorPids_[static_cast<size_t>(kind)].load(std::memory_order_acquire);
+    }
+
+    std::string_view breakpointMode() const noexcept
+    {
+        switch (breakpoint_.load(std::memory_order_acquire))
+        {
+        case Breakpoint::Hardware: return "hwbp";
+        case Breakpoint::Pte: return "ptebp";
+        case Breakpoint::Dpt: return "dptbp";
+        case Breakpoint::Step: return "stepbp";
+        case Breakpoint::None: return {};
+        }
+        return {};
+    }
+
+    int setBreakpoints(std::string_view mode, std::span<const Driver::bp_point> points)
+    {
+        int status = 0;
+        std::lock_guard targetLock(Config::TargetMutex);
+        if (breakpoint_.load(std::memory_order_acquire) != Breakpoint::None) return status = -EBUSY;
+        if (dr->GetGlobalPid() <= 0 || points.empty() || points.size() > BP_CONFIG_MAX) return status = -EINVAL;
+        Breakpoint selected;
+        if (mode == "hwbp")
+        {
+            selected = Breakpoint::Hardware;
+            status = dr->SetProcessHwbpRef(points);
+        }
+        else if (mode == "ptebp")
+        {
+            selected = Breakpoint::Pte;
+            status = dr->SetProcessPtebpRef(points);
+        }
+        else if (mode == "dptbp")
+        {
+            selected = Breakpoint::Dpt;
+            status = dr->SetProcessDptbpRef(points);
+        }
+        else if (mode == "stepbp")
+        {
+            selected = Breakpoint::Step;
+            status = dr->SetProcessStepbpRef(points);
+        }
+        else return status = -EINVAL;
+        if (status != 0) return status;
+        breakpoint_.store(selected, std::memory_order_release);
+        return status;
+    }
+
+    int clearBreakpoints()
+    {
+        int status = 0;
+        std::lock_guard targetLock(Config::TargetMutex);
+        removeBreakpoints();
+        return status;
+    }
+
+    bool dumpBusy() const noexcept { return dumping_.load(std::memory_order_acquire); }
+    int dumpStatus() const noexcept { return dumpStatus_.load(std::memory_order_acquire); }
+
+    int dumpMemory(std::string_view target, std::string *path = nullptr)
+    {
+        int status = 0;
+        std::lock_guard targetLock(Config::TargetMutex);
+        if (dr->GetGlobalPid() <= 0 || target.empty()) return status = -EINVAL;
+        if (!dr->DumpMemory(target, path)) return status = -EIO;
+        return status;
+    }
+
+    int startDump(std::string target)
+    {
+        int status = 0;
+        std::lock_guard targetLock(Config::TargetMutex);
+        if (dumping_.load(std::memory_order_acquire)) return status = -EBUSY;
+        if (dr->GetGlobalPid() <= 0 || target.empty()) return status = -EINVAL;
+        dumping_.store(true, std::memory_order_release);
+        dumpStatus_.store(0, std::memory_order_release);
+        try
+        {
+            dumpTask_ = std::async(std::launch::async, [this, target = std::move(target)]
+            {
+                int status = 0;
+                try { status = dumpMemory(target); }
+                catch (const std::bad_alloc &) { status = -ENOMEM; }
+                catch (...) { status = -EIO; }
+                dumpStatus_.store(status, std::memory_order_release);
+                dumping_.store(false, std::memory_order_release);
+            });
+        }
+        catch (const std::bad_alloc &) { status = -ENOMEM; }
+        catch (const std::system_error &error) { status = -error.code().value(); }
+        if (status != 0)
+        {
+            dumping_.store(false, std::memory_order_release);
+            return status;
+        }
+        return status;
+    }
+
+    int selectTarget(int pid)
+    {
+        int status = 0;
+        std::lock_guard targetLock(Config::TargetMutex);
+        if (pid <= 0) return status = -EINVAL;
+        if (pid == dr->GetGlobalPid()) return status;
+        if (gMemScanner->isScanning() || gPointerManager->isBusy() || dumping_.load(std::memory_order_acquire)) return status = -EBUSY;
+        status = stopMonitor(Monitor::Syscall);
+        if (status != 0) return status;
+        status = stopMonitor(Monitor::Cntvct);
+        if (status != 0) return status;
+        removeBreakpoints();
+        gSavedAddresses->clear();
+        gMemScanner->clear();
+        gMemViewer->clear();
+        gPointerManager->clear();
+        dr->SetGlobalPid(pid);
+        return status;
+    }
+
     ~ApplicationRuntime()
     {
-        Config::g_Running = false;
-        if (graphicsInitialized_) RenderVK::shutdown();
-        threadPools_.shutdown();
-        resources_.reset();
-        Config::UninstallThreadPools(threadPools_);
-    }
-
-    ResourceSet &resources() noexcept
-    {
-        return *resources_;
-    }
-
-    bool initializeGraphics(bool allowCapture)
-    {
-        graphicsInitialized_ = RenderVK::init(allowCapture);
-        return graphicsInitialized_;
+        if (dumpTask_.valid()) dumpTask_.wait();
+        for (const auto kind : {Monitor::Cntvct, Monitor::Syscall})
+            if (const int status = stopMonitor(kind); status != 0) LS_LOGE_TAG("Runtime", "停止监听失败: %d", status);
+        clearBreakpoints();
     }
 };
+
+inline std::unique_ptr<ApplicationRuntime> gApplicationRuntime = nullptr;

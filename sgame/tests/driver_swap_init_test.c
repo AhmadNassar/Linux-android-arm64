@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { OK, SWAP, PAGES, PROC, CONNECT, DISPATCH, HIDE_CONNECT, HIDE_DISPATCH, EXIT_HOOKS };
+enum { OK, SWAP, PAGES, PROC, CONNECT, DISPATCH, HIDE_CONNECT, HIDE_DISPATCH, EXIT_HOOKS, SIGNAL_TRACE };
 struct task_struct { int pid, refs, woken, stopped; };
 static struct task_struct tasks[3];
 static struct task_struct *volatile connect_thread_task, *volatile dispatch_thread_task;
@@ -34,6 +34,13 @@ static int expected_hidden(void) {
     return failure==HIDE_CONNECT ? 4 : failure==HIDE_DISPATCH ? 2 : 6;
 }
 static int do_exit_init(void) { assert(hidden==expected_hidden());return failure==EXIT_HOOKS ? -EOPNOTSUPP : 0; }
+static int signal_registered;
+static int signal_register(void) {
+    if (failure == SIGNAL_TRACE) return -ENOENT;
+    signal_registered = 1;
+    return 0;
+}
+static void signal_unregister(void) { signal_registered = 0; }
 static void sgame_cleanup_client(void) { ++cleanup_calls; }
 static void inline_hook_remove_all(void) { ++hook_cleanup; }
 #define cpu_render_init() (++renderer_calls, 0)
@@ -69,15 +76,16 @@ static int wake_up_process(struct task_struct *task) {
 static int entry(void *data) { (void)data;return 0; }
 int main(void) {
     const char *stages[]={"success","swap-api","physical-pages","proc-block","connect-thread","dispatch-thread",
-                          "hide-connect-thread","hide-dispatch-thread","exit-hooks"};
-    for(failure=OK;failure<=EXIT_HOOKS;++failure) {
+                          "hide-connect-thread","hide-dispatch-thread","exit-hooks","signal-trace"};
+    for(failure=OK;failure<=SIGNAL_TRACE;++failure) {
         memset(tasks,0,sizeof(tasks));last_error[0]=0;
         created=pages=cleanup_calls=live_threads=hidden=module_hidden=renderer_calls=hook_cleanup=0;
         sgame_stop_requested=false;
         int result=sgame_core_init(entry,entry);
-        bool succeeds=failure==OK || failure==HIDE_CONNECT || failure==HIDE_DISPATCH;
+        bool succeeds=failure==OK || failure==HIDE_CONNECT || failure==HIDE_DISPATCH || failure==SIGNAL_TRACE;
         if(succeeds) {
             assert(result==0 && module_hidden==1 && live_threads==2);
+            assert(signal_registered == (failure != SIGNAL_TRACE));
             assert(!cleanup_calls && !hook_cleanup);
             if(failure==OK) {
                 sgame_request_shutdown();
@@ -91,6 +99,7 @@ int main(void) {
             for(int i=0;i<created;++i)assert(!tasks[i].woken && tasks[i].stopped);
         }
         assert(cleanup_calls==1 && hook_cleanup==1 && !pages && !hidden && !renderer_calls && !live_threads);
+        assert(!signal_registered);
         assert(!connect_thread_task && !dispatch_thread_task);
         for(int i=0;i<3;++i)assert(!tasks[i].refs);
         printf("PASS: %s; best-effort thread hooks, renderer disabled and balanced cleanup\n",stages[failure]);

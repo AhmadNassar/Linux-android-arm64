@@ -47,13 +47,13 @@ namespace MemUtils
             if constexpr (std::is_same_v<T, float>) value = std::strtof(temp.c_str(), &end);
             else if constexpr (std::is_same_v<T, double>) value = std::strtod(temp.c_str(), &end);
             else value = std::strtold(temp.c_str(), &end);
-            if (end == temp.c_str() || *end != '\0' || !std::isfinite(value) || (errno == ERANGE && value == T{})) return std::nullopt;
+            if (end != temp.data() + temp.size() || !std::isfinite(value) || (errno == ERANGE && value == T{})) return std::nullopt;
             return value;
         }
         else
         {
             const long long value = std::strtoll(temp.c_str(), &end, 10);
-            if (errno == ERANGE || end == temp.c_str() || *end != '\0') return std::nullopt;
+            if (errno == ERANGE || end != temp.data() + temp.size()) return std::nullopt;
             if (value < static_cast<long long>(std::numeric_limits<T>::min()) || value > static_cast<long long>(std::numeric_limits<T>::max())) return std::nullopt;
             return static_cast<T>(value);
         }
@@ -79,38 +79,6 @@ namespace MemUtils
         double upper = 0;
         bool enabled = false;
     };
-
-    template <typename T> std::optional<FloatScanRange> ParseFloatScanRange(std::string_view text, FloatRounding rounding = FloatRounding::Rounded)
-    {
-        static_assert(std::is_floating_point_v<T>);
-        if (!ParseScanValue<T>(text)) return std::nullopt;
-        if (rounding == FloatRounding::Exact || text.find_first_of("xXpP") != std::string_view::npos) return FloatScanRange{};
-
-        const auto exponentPosition = text.find_first_of("eE");
-        const auto mantissa = text.substr(0, exponentPosition);
-        const auto decimalPosition = mantissa.find('.');
-        const size_t decimalDigits = decimalPosition == std::string_view::npos ? 0 : mantissa.size() - decimalPosition - 1;
-        long double exponent = 0;
-        if (exponentPosition != std::string_view::npos)
-        {
-            const std::string exponentText(text.substr(exponentPosition + 1));
-            exponent = std::strtold(exponentText.c_str(), nullptr);
-        }
-        const long double step = std::pow(10.0L, exponent - static_cast<long double>(decimalDigits));
-        if (!std::isfinite(step) || step == 0) return FloatScanRange{};
-
-        const long double center = *ParseScanValue<long double>(text);
-        const long double radius = rounding == FloatRounding::Rounded ? step / 2 : step;
-        const long double lower = rounding == FloatRounding::Truncated ? center : center - radius;
-        const long double upper = center + radius;
-        const long double lowest = std::numeric_limits<T>::lowest();
-        const long double highest = std::numeric_limits<T>::max();
-        T first = static_cast<T>(std::clamp(lower, lowest, highest));
-        T last = static_cast<T>(std::clamp(upper, lowest, highest));
-        if (static_cast<long double>(first) < lower) first = std::nextafter(first, std::numeric_limits<T>::infinity());
-        if (static_cast<long double>(last) > upper || (rounding != FloatRounding::Extreme && static_cast<long double>(last) == upper)) last = std::nextafter(last, -std::numeric_limits<T>::infinity());
-        return FloatScanRange{static_cast<double>(first), static_cast<double>(last), true};
-    }
 
     template <typename T> bool Compare(T value, T target, Types::FuzzyMode mode, T lastValue, T rangeMax = T{}, FloatScanRange floatRange = {})
     {

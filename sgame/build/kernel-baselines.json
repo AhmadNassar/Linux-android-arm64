@@ -101,5 +101,111 @@
     },
     "superproject_commit": "c516b6c3e5b60a0c6f54715cf229a34d64682894",
     "manifest_file": "6.12.58-manifest.xml"
+  },
+  "kernel_5_15": {
+    "version": "5.15.206",
+    "android": 13,
+    "kmi_generation": 8,
+    "manifest_branch": "common-android13-5.15-2026-06",
+    "manifest_commit": "377b4061e38ce4b775f8732db18a2c35e2bdd6b4",
+    "superproject_commit": "401af5287d23b23843df2cba8b6641420498cab4",
+    "common_commit": "784b36eff4f6efa22d89fa8256899274714758eb",
+    "source": "https://android.googlesource.com/kernel/common/",
+    "clang": "r450784e",
+    "clang_commit": "9f759dee5cdc5f85d076c642a192f6a9232f7058",
+    "manifest_file": "5.15.206-manifest.xml",
+    "targets": {
+      "4k": "kernel_aarch64"
+    },
+    "delivery_page_sizes": [
+      "4k"
+    ],
+    "reference_sha256": {
+      "Makefile": "d874c2e6c5a66d06eaab28f1eea8283039f64fcb8ab24fdf9dc87a3b0c4a7d84",
+      "build.config.constants": "9504b8cfb6e4805f7bf479a564869dcf043161bc80589ae138dab4173489d675",
+      "build.config.common": "36c744b5a07629e3c9a0852ebab0740af33d8f4e5502fcaf4128c76c24258372",
+      "mm/page_io.c": "86101981080ebdaebb03f71135823bbc88082c28128f11c249d5980fbca2fe82",
+      "mm/swap_state.c": "e0ee81d9eff44ee1a97a987d66ce22eacc60adbc7c882d401d50fc527e5d6b10",
+      "mm/swapfile.c": "7f48d725d0e224f7098aaeac0bf9367d7a7e6732c8da22c57e18e891699d0d7e",
+      "include/linux/pagemap.h": "67d856ffb6c6c5bba6c6cbe86e9f80be1945991be75cf9ec9e033bda27e3a6b9",
+      "include/linux/tracepoint.h": "9eabb93ec6b87aebd344fbb8e245b419722e81b2371c5730f86a0e5293173175",
+      "include/linux/swapops.h": "6c4ad6cf5227e20085d1ee4fb78907448d286f19ed9368785484599c95f0a65d",
+      "include/linux/swap.h": "ab8b687f95ac2dde31fa127f295176ef485d52b46cf3dee3f61bbe971f5f28e0",
+      "include/linux/mm.h": "fd08b82c311b3dbd002d722b25bdac1ec866d8c75e7c332e3573281c3bc47503",
+      "include/linux/mm_types.h": "e0b91d744c3d604e1fe15f1e8b00f93979c618cbaf9f6f0504b229eab8ef9b04",
+      "include/trace/events/signal.h": "0b6fe2f241b547b4fec247e2659501366dab5039b98a066558287bedaf084774",
+      "arch/arm64/include/asm/pgtable.h": "9421ebb587f8d4629a2039c7f546934f71f0627240e8de9aff812e3364209b0b"
+    }
+  },
+  "kernel_6_6": {
+    "version": "6.6.89",
+    "android": 15,
+    "kmi_generation": 8,
+    "manifest_branch": "common-android15-6.6-2025-06",
+    "manifest_commit": "d7afe67bb0c9ecab76976ccab92fea8db1c9701e",
+    "superproject_commit": "182b52e40c9a59f5e8dd3f9f8bcf07e39326a156",
+    "common_commit": "e2724f52086d40b5a1e0c2bd089e3407ed490ec6",
+    "source": "https://android.googlesource.com/kernel/common/",
+    "clang": "r510928",
+    "clang_commit": "62dc563017359bca29c4a08f5f27d8ecae763462",
+    "manifest_file": "6.6.89-manifest.xml",
+    "targets": {
+      "4k": "kernel_aarch64"
+    },
+    "delivery_page_sizes": [
+      "4k"
+    ],
+    "reference_sha256": {
+      "Makefile": "110f55dc2be6059ed4d249cb194feda39ffd041916d5f4e6dbe9085fc831f5bf",
+      "build.config.constants": "4514346a097e121fd15a0dda3267a92c3479eaa942e79d56918c781a45c3c4a5",
+      "build.config.common": "0ed1c66204ea22445485818ad1cb45b624fc0753f63ebc5d0c920348bd9d7d8f",
+      "mm/page_io.c": "29a0234e7a8ad54d7808d1ccdf79d9c65fe941c1a24d4c4567c76a13507d6252",
+      "mm/swap_state.c": "def023b13e5ffc17858a5ca9e2d075a3eb4095d4b0f9fe7c8df25cf5363b760c",
+      "mm/swapfile.c": "450b23353aaf9a74f9faf1f906c5d1a5e0aa92f109aba349bca6d033c12095d1",
+      "include/linux/pagemap.h": "e4ba35dce842117f27ff25b646472cd57e86560e748b6eb2b6f8561fa06fa549",
+      "include/linux/tracepoint.h": "1b17dc26bb4da0270a7aacbf8d94630e5fdf9ac5d7dae34fc5903123f9e02f92",
+      "include/linux/swapops.h": "4285d3dd97e08c071d28d606830148fe09bf7c38c210af67853a8a7437bdbf14",
+      "include/linux/swap.h": "1ecd75d361e5e74ba1a1e882a2ef3c6f240a0f2ad01235146a13b4e378948b10",
+      "include/linux/mm.h": "84625b7b080d77f7c8f988b9dfce28063f3c62955f46c17421deff20a1f727de",
+      "include/linux/mm_types.h": "83217ab94bccfca029b38c6a503a4f6ae581d981a4afd60ffc0423a6cd5e8c4b",
+      "include/trace/events/signal.h": "0b6fe2f241b547b4fec247e2659501366dab5039b98a066558287bedaf084774",
+      "arch/arm64/include/asm/pgtable.h": "e1f09d4c505f326c18dc93ca18a132978232245b0bb0ea3669404f6cf52f5d61"
+    }
+  },
+  "kernel_6_18": {
+    "version": "6.18.21",
+    "android": 17,
+    "kmi_generation": 5,
+    "manifest_branch": "common-android17-6.18-2026-06",
+    "manifest_commit": "1603c85904e720c4f3fb7f8a6ce0efff9ac6c789",
+    "superproject_commit": "eb05bccb585929a39495969b7a926f9c0d51ab70",
+    "common_commit": "dd1b0af2c9645e2d6b5a2d72a3ea650081c7537d",
+    "source": "https://android.googlesource.com/kernel/common/",
+    "clang": "r584948c",
+    "clang_commit": "4a7d0a5e443c27d8f68fbd46abfab464e1355a69",
+    "manifest_file": "6.18.21-manifest.xml",
+    "targets": {
+      "4k": "kernel_aarch64"
+    },
+    "delivery_page_sizes": [
+      "4k"
+    ],
+    "reference_sha256": {
+      "Makefile": "ca0c14974a2193a848f8c4169148ed395c4931e18b59843a80ee40d7349fdf74",
+      "build.config.constants": "69b51ac2001931506a358a3bcf275b2525d99bcf87f45996f3bc4b01b0aec48a",
+      "build.config.common": "6eaed0b9e29e071fb2718452ccd35adf5db4da7a46ea1432abe586c3eea20f45",
+      "bazel/constants.scl": "8fdd4673152978b45ae0349277892b546d1ce9225831a80ebe7e1c7d9b7b73af",
+      "mm/page_io.c": "b3cd3f11d131216fdb328b04181caefa3cd8423df86ba429d06f5f4853325c7a",
+      "mm/swap_state.c": "2929624b1e8472eed0665b375bd6b2c3aba848012b4b2a27eec3438a1da3b276",
+      "mm/swapfile.c": "3104f1a3db6b1c7bc3e73f81ef57b5ebedd6992f35018ffd1e6ec7d636f50483",
+      "include/linux/pagemap.h": "86b441849dc76d1411e7ce4f4bafe97a8d6a70e3d1677f682100a835c71a28ad",
+      "include/linux/tracepoint.h": "9e0bd953dadf64e84232834942cb2a3fd0b4d1fb5383f30c35996fd770630fd2",
+      "include/linux/swapops.h": "cf8cedbde21ab893280223ce2894596841159411b6799ee19b9146894f6d1a47",
+      "include/linux/swap.h": "8a35c0b5dffdb354422126ca0c3d5b947ee68ec904160f4e3b63be092a7e62b9",
+      "include/linux/mm.h": "0ebea971b694f8f26a402be139362e352a23ff059b350976d37ac08f1282d960",
+      "include/linux/mm_types.h": "d024ffd37a47ab5f49a3057d4b72f17048812a906179a998488a14506afa167c",
+      "include/trace/events/signal.h": "0b6fe2f241b547b4fec247e2659501366dab5039b98a066558287bedaf084774",
+      "arch/arm64/include/asm/pgtable.h": "17f2a68ce5afe0391c4c53eb0c3bac568020af945ec7b2b1dcd19ee85471487c"
+    }
   }
 }

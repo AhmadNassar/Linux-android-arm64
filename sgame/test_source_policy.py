@@ -44,4 +44,7 @@ for name in ('build-read-matrix.sh', 'build-5.10.sh', 'build_5_10.py', '5.10-bas
              'verify_gki_module.py', 'verify_pac_scs.py', 'kernel-baselines.json',
              '6.12.23-manifest.xml', '6.12.58-manifest.xml'):
     assert (ROOT/'sgame/build'/name).is_file(), name
+for name in ('build-gki.sh', 'build_nc_matrix.py', '5.15.206-manifest.xml',
+             '6.6.89-manifest.xml', '6.18.21-manifest.xml'):
+    assert (ROOT/'sgame/build'/name).is_file(), name
 print('PASS: author interfaces/native PTE and project extensions retained; upstream CPU rendering paused; network probe disabled; committed-source builds')

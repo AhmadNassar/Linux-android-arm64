@@ -1,16 +1,15 @@
 # SGAME driver development branch
 
-This branch is based on upstream `adef23a7e537efc937f01cfbbd44c3c7c33be216`.
+This branch integrates upstream `0a33fa0ef468873a2c94b2876eb88a6dfb482ec9` and retains the project's subsequent breakpoint fixes.
 Develop the complete source directly. There is no patch-application step in the build.
 `main` remains the upstream comparison branch. Provenance is recorded in `upstream.json`.
 
 ## Behavior
 
 - Author module hiding, service-thread hiding, client hiding, KGSL hiding, proc blocking,
-  taskstats exit hook, exception/exit diagnostics and CPU rendering are retained.
+  taskstats exit hook and exception/exit diagnostics are retained.
 - The fixed outbound initialization Ping is disabled. No other author feature group is disabled.
-- The upstream CPU renderer and its five-second initialization demonstration are retained,
-  including upstream's nonfatal handling of unsupported rendering.
+- CPU rendering remains disabled in the lifecycle, following the selected upstream revision.
 - Client and GPU hide calls run before the handshake completion flag. Kernel logs include
   `connection: pid=... task_hide=... kgsl_hide=... handshake=ready`.
   As upstream, failed client hide hooks do not disable the memory transport. A successful
@@ -28,10 +27,16 @@ Develop the complete source directly. There is no patch-application step in the 
 - The real PTE breakpoint header now provided by upstream is used. The old unavailable stub
   is not imported. Public author headers are preserved at the selected upstream revision.
 - SG6 environment extension 1.1.0 remains in `lsdriver/sgame_simulation/`; emulation remains
-  in userspace. The Swap/core version is 1.2.0 (`author-features-group-poll`).
+  in userspace. The Swap/core version is 1.3.0 (`author-features-group-poll`).
 - Android 12/13 5.10 use the page-based Swap API, including its boolean `do_poll`
   argument. Their RCU device guard ends after the slot reference is acquired and
-  before cache/backend waits. Existing folio paths for 6.1/6.12 are retained.
+  before cache/backend waits. Android 13 5.15 also uses page APIs, retaining its
+  sleepable device reference through I/O. Android 15 6.6 uses the head folio's
+  base swap entry with page-returning backend APIs; 6.12 uses folio-returning APIs.
+  Android 17 6.18 additionally uses the one-argument swap-table cache lookup.
+- Inherited LS children do not replace their connected parent. Upstream client
+  candidate, SIGKILL and final process-exit diagnostics are integrated; existing
+  exception hooks and deferred sleeping cleanup remain in place.
 - Ordinary C inherits target Kbuild PAC/BTI/SCS settings; hardware template ISA declarations
   remain local to the assembly blocks, retaining the project's PAC/SCS fix.
 
@@ -40,6 +45,7 @@ Develop the complete source directly. There is no patch-application step in the 
 ```bash
 bash sgame/test_driver_swap.sh
 bash sgame/test_driver_simulation.sh
+bash sgame/test_driver_ptebp.sh
 python3 sgame/test_source_policy.py
 ```
 
@@ -68,7 +74,32 @@ bash sgame/build/build-read-matrix.sh /path/to/work61 /path/to/work-a16-5 /path/
 Builds record the Git commit, exact exported file hashes, kernel/KMI/page size, mode, module metadata,
 imports and output SHA-256. Native 4K is the application's delivery configuration; the author's
 fixed user mapping address still requires separate userspace work for native 16K devices.
-The three kernel environments are pinned independently of upstream driver updates.
+Kernel environments are pinned independently of upstream driver updates.
+
+### Full NC matrix
+
+The November 25, 2026 build includes eight 4K NC modules. Cached variants are
+not built by `build/build_nc_matrix.py`. Each profile uses its own prepared source copy.
+
+| Profile | Kernel | Android / KMI |
+| --- | --- | --- |
+| a12-510 | 5.10.237 | 12 / 9 |
+| a13-510 | 5.10.237 | 13 / 4 |
+| a13-515 | 5.15.206 | 13 / 8 |
+| a14-61 | 6.1.138 | 14 / 11 |
+| a15-66 | 6.6.89 | 15 / 8 |
+| a16-5 | 6.12.23 | 16 / 5 |
+| a16-6 | 6.12.58 | 16 / 6 |
+| a17-618 | 6.18.21 | 17 / 5 |
+
+New 5.15/6.6/6.18 manifests pin GKI dependencies to their recorded Google
+superprojects. Vendor modules, bootloader targets and kernel testing projects
+are omitted. The source commit and reference hashes are in `build/kernel-baselines.json`.
+
+Export NC source with `--read-mode nc` and pass the prepared workspaces and a new
+artifact directory to `build/build_nc_matrix.py`. `--profiles` selects a subset for resuming a
+matrix. Legacy inputs live under `WORK/deps` and `WORK/host-inputs`; modern workspaces use
+`WORK/PROFILE/kernels/KERNEL-AndroidVERSION`. All module metadata and imports are checked against real GKI outputs.
 
 ### Android 5.10
 

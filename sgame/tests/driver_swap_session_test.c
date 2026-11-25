@@ -19,6 +19,7 @@ struct task_struct {
     struct signal_struct *signal;
     struct mm_struct *mm;
     struct task_struct *next;
+    struct task_struct *real_parent;
 };
 struct request_obj { int user, kernel, status; char data[8192]; };
 struct page { int unused; };
@@ -50,6 +51,7 @@ static int g_syscall_monitor_pids[2], g_cntvct_monitor_tgid;
 #define for_each_process(t) for ((t) = processes; (t); (t) = (t)->next)
 #define rcu_read_lock() (++rcu_depth)
 #define rcu_read_unlock() (--rcu_depth)
+#define rcu_dereference(x) (x)
 #define atomic_read(x) (*(x))
 #define mutex_lock(x) assert(pthread_mutex_lock(x) == 0)
 #define mutex_unlock(x) assert(pthread_mutex_unlock(x) == 0)
@@ -68,6 +70,9 @@ static struct mm_struct *get_task_mm(struct task_struct *task) {
     return task->mm;
 }
 static void mmput(struct mm_struct *mm) { assert(mm->refs == 1); --mm->refs; }
+static void log_connect_candidate(int tgid, unsigned long long start, struct mm_struct *mm) {
+    assert(tgid > 0 && start > 0 && mm->refs == 1);
+}
 static void *kmalloc_array(int count, size_t size, int flags) {
     (void)flags;
     return calloc((size_t)count, size);
@@ -179,6 +184,13 @@ int main(void) {
     assert(strstr(connection_log, "task_hide=0 kgsl_hide=0 handshake=ready"));
     puts("PASS: both client hooks execute before handshake publication");
     puts("PASS: live worker group retains client even after leader exit");
+    tasks[1].real_parent = &tasks[0];
+    assert(sgame_find_client() == NULL && !rcu_depth && !tasks[1].refs);
+    tasks[1].real_parent = &tasks[2];
+    struct task_struct *independent = sgame_find_client();
+    assert(independent == &tasks[1] && independent->refs == 1);
+    put_task_struct(independent);
+    puts("PASS: inherited LS child is skipped while an independent newer client can reconnect");
 
     /* Main holds the same lock as a sleeping swap request. New pages can be
      * pinned concurrently, but replacing/releasing the request must wait. */

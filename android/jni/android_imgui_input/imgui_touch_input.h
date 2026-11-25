@@ -1,453 +1,393 @@
 #pragma once
+
 #include "../logger/logger.h"
-#include <stdio.h>
-#include <stdlib.h>
+#include "imgui/imgui.h"
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <charconv>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <cmath>
 #include <linux/input.h>
-#include <linux/uinput.h>
-#include <poll.h> // 引入 poll 机制
-#include "imgui/imgui.h"
-#include <array>
-#include <atomic>
-#include <thread>
-#include <vector>
+#include <memory>
 #include <mutex>
-#include <string.h>
-#include <errno.h>
-#include <algorithm>
+#include <new>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <system_error>
+#include <thread>
+#include <tuple>
+#include <unistd.h>
+#include <utility>
+#include <vector>
 
-#define MAX_DEVICES 5
-#define MAX_FINGERS 10
-#define MAX_PENDING_TOUCH_EVENTS 2048
-
-// 全局状态变量
-inline std::atomic<uint32_t> orientation{0};
-inline std::atomic<float> screenHeight{0}, screenWidth{0};
-inline std::atomic<bool> Touch_initialized{false};
-
-// 触摸点对象结构
+// 快照仅包含仍按下的触点；slot 是当前触摸设备的 ABS_MT_SLOT。
+// 坐标与 setScreen 指定的屏幕尺寸/方向一致，不依赖 ImGui 帧刷新。
 struct TouchPoint
 {
-    bool isDown = false;
-    int x = 0;
-    int y = 0;
-    int id = -1;
+    int slot;
+    float x, y;
 };
 
-enum class TouchInputEventType
+struct TouchDebugView
 {
-    Position,
-    Button
+    bool showPoints, showRect;
+    ImVec2 rectMin, rectMax;
+    const char *hitLabel;
 };
 
-struct TouchInputEvent
+class TouchInput
 {
-    TouchInputEventType type;
-    float x = 0.0f;
-    float y = 0.0f;
-    bool down = false;
-};
+    mutable std::mutex mutex;
 
-// 设备配置结构
-struct DeviceConfig
-{
-    int deviceIndex;
-    int maxX;
-    int maxY;
-    int deviceFd;
-    std::thread task;
-};
-
-// 全局变量
-inline TouchPoint fingers[MAX_DEVICES][MAX_FINGERS];
-inline std::vector<DeviceConfig> devices;
-inline std::vector<TouchInputEvent> pendingTouchEvents;
-inline std::mutex touch_mutex; // 全局触摸数据锁
-
-inline std::array<std::array<TouchPoint, MAX_FINGERS>, MAX_DEVICES> Touch_GetSnapshot()
-{
-    std::array<std::array<TouchPoint, MAX_FINGERS>, MAX_DEVICES> snapshot{};
-    std::lock_guard<std::mutex> lock(touch_mutex);
-    for (size_t deviceIndex = 0; deviceIndex < snapshot.size(); ++deviceIndex)
+    struct Event
     {
-        std::copy_n(fingers[deviceIndex], MAX_FINGERS, snapshot[deviceIndex].begin());
+        enum Kind
+        {
+            Position,
+            Press,
+            Release
+        } kind;
+        int x = 0, y = 0;
+    };
+    std::array<Event, 2048> pending;
+    std::array<Event, 2048> dispatch; // 仅渲染线程使用，避免每帧分配事件批次。
+    size_t count = 0;
+    struct Slot
+    {
+        int id = -1, x = 0, y = 0;
+    };
+    struct Contact
+    {
+        int slot;
+        ImVec2 pos;
+    };
+    std::vector<Contact> reported; // 最后一次完整 SYN_REPORT，归一化坐标，受 mutex 保护。
+    std::vector<Contact> frame;    // 渲染线程在 NewFrame 之前锁存的屏幕坐标。
+    int width = 0, height = 0, rotation = 0;
+    int fd = -1;
+    int workerStatus = 0;
+    bool blocking = false;
+    std::jthread worker;
+
+    static bool hasBit(int bit, const uint8_t *bits)
+    {
+        return (bits[bit / 8] & (1u << (bit % 8))) != 0;
     }
-    return snapshot;
-}
 
-inline void enqueueTouchEvent(const TouchInputEvent &event)
-{
-    if (pendingTouchEvents.size() >= MAX_PENDING_TOUCH_EVENTS) pendingTouchEvents.clear();
-    pendingTouchEvents.push_back(event);
-}
-
-inline bool testInputBit(int bit, const uint8_t *array)
-{
-    return (array[bit / 8] & (1u << (bit % 8))) != 0;
-}
-
-// 更新屏幕信息
-inline void UpdateScreenData(int w, int h, uint32_t orientation_)
-{
-    screenWidth.store((float)w, std::memory_order_relaxed);
-    screenHeight.store((float)h, std::memory_order_relaxed);
-    orientation.store(orientation_, std::memory_order_relaxed);
-}
-
-// 触摸事件处理线程。参数按值传入，避免 devices 扩容或清理后留下悬空指针。
-inline void deviceHandlerThread(int deviceIndex, int fd, int maxX, int maxY)
-{
-    float hwMaxX = (float)(maxX > 0 ? maxX : 1);
-    float hwMaxY = (float)(maxY > 0 ? maxY : 1);
-
-    input_event inputEvents[64];
-    int currentSlot = 0;
-
-    // 线程本地缓存（等 SYN_REPORT 到了再统一提交）
-    bool slot_active[MAX_FINGERS] = {false};
-    int slot_raw_x[MAX_FINGERS] = {0};
-    int slot_raw_y[MAX_FINGERS] = {0};
-    int slot_id[MAX_FINGERS] = {-1};
-
-    struct pollfd pfd;
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-
-    while (Touch_initialized.load(std::memory_order_acquire))
+    static ImVec2 screenPosition(ImVec2 p, int width, int height, int rotation)
     {
-        // 使用 poll 等待输入事件，超时设置为 50ms 以便及时响应退出指令
-        int poll_ret = poll(&pfd, 1, 50);
-        if (poll_ret == 0) continue;
-        if (poll_ret < 0)
+        switch (rotation)
         {
-            if (errno == EINTR) continue;
-            LS_LOGE_TAG("Touch", "poll 设备失败: %s", strerror(errno));
-            break;
+        case 1:
+            return {p.y * width, (1 - p.x) * height};
+        case 2:
+            return {(1 - p.x) * width, (1 - p.y) * height};
+        case 3:
+            return {(1 - p.y) * width, p.x * height};
+        default:
+            return {p.x * width, p.y * height};
         }
-        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
-        {
-            LS_LOGE_TAG("Touch", "输入设备断开 revents=0x%x", pfd.revents);
-            break;
-        }
+    }
 
-        auto readSize = read(fd, inputEvents, sizeof(inputEvents));
-        if (readSize <= 0)
+    static void ReadEvents(std::stop_token stop, TouchInput *self, int input, int minX, int minY, double dx, double dy, std::vector<Slot> slots, std::vector<Contact> contacts)
+    {
+        // 各触点先缓存在输入线程，等 SYN_REPORT 到达再提交一批事件。
+        int status = 0;
+        int slot = 0, lastX = 0, lastY = 0;
+        bool wasDown = false;
+        pollfd pfd{input, POLLIN, 0};
+        input_event events[64];
+        while (!stop.stop_requested())
         {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            LS_LOGE_TAG("Touch", "读取输入设备失败: %s", strerror(errno));
-            break; // 设备断开
-        }
-
-        size_t count = size_t(readSize) / sizeof(input_event);
-        for (size_t i = 0; i < count; i++)
-        {
-            input_event &ie = inputEvents[i];
-
-            if (ie.type == EV_ABS)
+            // 50 ms 超时使空闲设备也能及时响应退出请求。
+            const int ready = poll(&pfd, 1, 50);
+            if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
+            if (ready < 0)
             {
-                switch (ie.code)
+                status = -errno;
+                LS_LOGE_TAG("Touch", "poll 设备失败: %s", strerror(-status));
+                break;
+            }
+            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+            {
+                status = (pfd.revents & POLLNVAL) ? -EBADF : -ENODEV;
+                LS_LOGE_TAG("Touch", "输入设备断开 revents=0x%x", pfd.revents);
+                break;
+            }
+            const ssize_t bytes = read(input, events, sizeof(events));
+            if (bytes < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            if (bytes <= 0)
+            {
+                status = bytes == 0 ? -ENODEV : -errno;
+                LS_LOGE_TAG("Touch", "读取输入设备失败: %s", bytes == 0 ? "EOF" : strerror(-status));
+                break;
+            }
+            for (size_t i = 0; i < static_cast<size_t>(bytes) / sizeof(input_event); ++i)
+            {
+                const auto &event = events[i];
+                if (event.type == EV_ABS)
                 {
-                case ABS_MT_SLOT:
-                    if (ie.value < 0 || ie.value >= MAX_FINGERS)
+                    switch (event.code)
                     {
-                        currentSlot = -1;
+                    case ABS_MT_SLOT:
+                        slot = event.value >= 0 && event.value < static_cast<int>(std::size(slots)) ? event.value : -1;
+                        break;
+                    case ABS_MT_TRACKING_ID:
+                        if (slot >= 0) slots[slot].id = event.value;
+                        break;
+                    case ABS_MT_POSITION_X:
+                        if (slot >= 0) slots[slot].x = event.value;
+                        break;
+                    case ABS_MT_POSITION_Y:
+                        if (slot >= 0) slots[slot].y = event.value;
                         break;
                     }
-                    currentSlot = ie.value;
-                    break;
-                case ABS_MT_TRACKING_ID:
-                    if (currentSlot < 0) break;
-                    if (ie.value == -1)
-                    {
-                        slot_active[currentSlot] = false;
-                        slot_id[currentSlot] = -1;
-                    }
-                    else
-                    {
-                        slot_active[currentSlot] = true;
-                        slot_id[currentSlot] = ie.value;
-                    }
-                    break;
-                case ABS_MT_POSITION_X:
-                    if (currentSlot < 0) break;
-                    slot_raw_x[currentSlot] = ie.value;
-                    break;
-                case ABS_MT_POSITION_Y:
-                    if (currentSlot < 0) break;
-                    slot_raw_y[currentSlot] = ie.value;
-                    break;
+                    continue;
                 }
-            }
-            else if (ie.type == EV_SYN && ie.code == SYN_REPORT)
-            {
-                // 收到同步信号，计算坐标并加锁提交到全局变量
-                float sw = screenWidth.load(std::memory_order_relaxed);
-                float sh = screenHeight.load(std::memory_order_relaxed);
-                uint32_t orient = orientation.load(std::memory_order_relaxed);
-
-                std::lock_guard<std::mutex> lock(touch_mutex); // 保护全局触摸状态和待提交事件
-
-                bool wasDown = false;
-                int previousX = 0;
-                int previousY = 0;
-                for (int s = 0; s < MAX_FINGERS; ++s)
+                if (event.type != EV_SYN || event.code != SYN_REPORT) continue;
+                // 扫描和归一化在锁外完成；两个缓冲区均在启动时预分配。
+                contacts.clear();
+                for (size_t index = 0; index < slots.size(); ++index)
                 {
-                    if (!fingers[deviceIndex][s].isDown) continue;
-                    wasDown = true;
-                    previousX = fingers[deviceIndex][s].x;
-                    previousY = fingers[deviceIndex][s].y;
-                    break;
+                    const auto &finger = slots[index];
+                    if (finger.id < 0) continue;
+                    contacts.push_back({static_cast<int>(index), {static_cast<float>((double(finger.x) - minX) / dx), static_cast<float>((double(finger.y) - minY) / dy)}});
                 }
-
-                for (int s = 0; s < MAX_FINGERS; s++)
+                // 触点、屏幕参数和对应事件在同一临界区内发布。
+                std::lock_guard lock(self->mutex);
+                self->reported.swap(contacts);
+                const bool resync = self->count + 2 > self->pending.size();
+                if (resync) self->count = 0;
+                const bool down = !self->reported.empty();
+                if (down) // 菜单只收到一个主指针，其他手指只用于调试绘制。
                 {
-                    fingers[deviceIndex][s].isDown = slot_active[s];
-                    fingers[deviceIndex][s].id = slot_id[s];
-
-                    if (slot_active[s])
-                    {
-                        float normX = (float)slot_raw_x[s] / hwMaxX;
-                        float normY = (float)slot_raw_y[s] / hwMaxY;
-                        float fx = normX * sw, fy = normY * sh;
-
-                        switch (orient)
-                        {
-                        case 1:
-                            fx = normY * sw;
-                            fy = (1.0f - normX) * sh;
-                            break;
-                        case 2:
-                            fx = (1.0f - normX) * sw;
-                            fy = (1.0f - normY) * sh;
-                            break;
-                        case 3:
-                            fx = (1.0f - normY) * sw;
-                            fy = normX * sh;
-                            break;
-                        }
-
-                        fingers[deviceIndex][s].x = (int)fx;
-                        fingers[deviceIndex][s].y = (int)fy;
-                    }
+                    const auto p = screenPosition(self->reported.front().pos, self->width, self->height, self->rotation);
+                    const int px = static_cast<int>(p.x), py = static_cast<int>(p.y);
+                    if (resync || !wasDown || px != lastX || py != lastY) self->pending[self->count++] = {Event::Position, px, py};
+                    lastX = px;
+                    lastY = py;
                 }
-
-                bool isDown = false;
-                int currentX = 0;
-                int currentY = 0;
-                for (int s = 0; s < MAX_FINGERS; ++s)
-                {
-                    if (!fingers[deviceIndex][s].isDown) continue;
-                    isDown = true;
-                    currentX = fingers[deviceIndex][s].x;
-                    currentY = fingers[deviceIndex][s].y;
-                    break; // 仅取第一个手指给 ImGui
-                }
-
-                if (isDown && (!wasDown || currentX != previousX || currentY != previousY))
-                {
-                    enqueueTouchEvent({TouchInputEventType::Position, (float)currentX, (float)currentY, false});
-                }
-                if (wasDown != isDown)
-                {
-                    enqueueTouchEvent({TouchInputEventType::Button, 0.0f, 0.0f, isDown});
-                }
-                // 注意：这里已经移除了 ImGui 的操作，交由主线程处理！
+                if (resync || down != wasDown) self->pending[self->count++] = {down ? Event::Press : Event::Release};
+                wasDown = down;
             }
         }
-    }
-    close(fd);
-}
-
-// 需在你的主循环中调用 (ImGui::NewFrame 之前)
-inline void Touch_UpdateImGui()
-{
-    if (!Touch_initialized.load(std::memory_order_acquire)) return;
-
-    std::vector<TouchInputEvent> events;
-    {
-        std::lock_guard<std::mutex> lock(touch_mutex);
-        events.swap(pendingTouchEvents);
-    }
-    if (events.empty()) return;
-
-    ImGuiIO &io = ImGui::GetIO();
-    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-    for (const TouchInputEvent &event : events)
-    {
-        if (event.type == TouchInputEventType::Position) io.AddMousePosEvent(event.x, event.y);
-        else io.AddMouseButtonEvent(0, event.down);
-    }
-}
-
-inline bool Touch_Init()
-{
-    if (Touch_initialized.load(std::memory_order_acquire)) return true;
-
-    {
-        std::lock_guard<std::mutex> lock(touch_mutex);
-        pendingTouchEvents.clear();
-        for (auto &deviceFingers : fingers)
-            for (TouchPoint &finger : deviceFingers) finger = {};
-    }
-
-    DIR *dir = opendir("/dev/input/");
-    if (!dir) return false;
-
-    dirent *ptr = NULL;
-    char device_path[256];
-
-    struct DeviceInfo
-    {
-        int fd, eventNum, maxX, maxY;
-        bool isDirect, isPointer;
-        char path[256];
-        char name[128];
-    };
-    std::vector<DeviceInfo> found_devices;
-
-    while ((ptr = readdir(dir)) != NULL)
-    {
-        if (strncmp(ptr->d_name, "event", 5) == 0)
+        std::lock_guard lock(self->mutex);
+        self->workerStatus = status;
+        self->reported.clear();
+        if (wasDown)
         {
-            snprintf(device_path, sizeof(device_path), "/dev/input/%s", ptr->d_name);
-            // 依然使用 O_NONBLOCK，配合 poll 完美运行
-            int fd = open(device_path, O_RDONLY | O_NONBLOCK);
-            if (fd < 0) continue;
-
-            uint8_t abs_bits[(ABS_MAX + 8) / 8] = {};
-            if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits) >= 0 && testInputBit(ABS_MT_SLOT, abs_bits) && testInputBit(ABS_MT_POSITION_X, abs_bits) && testInputBit(ABS_MT_POSITION_Y, abs_bits))
-            {
-                DeviceInfo info;
-                info.fd = fd;
-                info.isDirect = false;
-                info.isPointer = false;
-                snprintf(info.path, sizeof(info.path), "%s", device_path);
-                memset(info.name, 0, sizeof(info.name));
-                if (ioctl(fd, EVIOCGNAME(sizeof(info.name)), info.name) < 0) snprintf(info.name, sizeof(info.name), "unknown");
-                sscanf(ptr->d_name, "event%d", &info.eventNum);
-
-                input_absinfo absX, absY;
-                if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &absX) == 0 && ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &absY) == 0)
-                {
-                    uint8_t prop_bits[(INPUT_PROP_MAX + 8) / 8] = {};
-                    if (ioctl(fd, EVIOCGPROP(sizeof(prop_bits)), prop_bits) == 0)
-                    {
-                        info.isDirect = testInputBit(INPUT_PROP_DIRECT, prop_bits);
-                        info.isPointer = testInputBit(INPUT_PROP_POINTER, prop_bits);
-                    }
-
-                    info.maxX = absX.maximum;
-                    info.maxY = absY.maximum;
-                    found_devices.push_back(info);
-                }
-                else
-                {
-                    close(fd);
-                }
-            }
-            else
-            {
-                close(fd);
-            }
+            if (self->count == self->pending.size()) self->count = 0;
+            self->pending[self->count++] = {Event::Release};
         }
     }
-    closedir(dir);
 
-    if (found_devices.empty()) return false;
-
-    std::sort(found_devices.begin(), found_devices.end(),
-              [](const DeviceInfo &a, const DeviceInfo &b)
-              {
-                  if (a.isDirect != b.isDirect) return a.isDirect;
-                  if (a.isPointer != b.isPointer) return !a.isPointer;
-
-                  long long areaA = (long long)a.maxX * (long long)a.maxY;
-                  long long areaB = (long long)b.maxX * (long long)b.maxY;
-                  if (areaA != areaB) return areaA > areaB;
-
-                  return a.eventNum < b.eventNum;
-              });
-
-    for (size_t i = 1; i < found_devices.size(); ++i) close(found_devices[i].fd);
-    found_devices.resize(1);
-
-    devices.clear();
-    devices.reserve(found_devices.size());
-    Touch_initialized.store(true, std::memory_order_release);
-
-    for (const auto &dev_info : found_devices)
+    void shutdown()
     {
-        if (devices.size() >= MAX_DEVICES)
+        if (worker.joinable())
         {
-            close(dev_info.fd);
-            continue;
+            worker.request_stop();
+            worker.join();
         }
-
-        devices.emplace_back();
-        DeviceConfig &config_ref = devices.back();
-        config_ref.deviceIndex = devices.size() - 1;
-        config_ref.deviceFd = dev_info.fd;
-        config_ref.maxX = dev_info.maxX;
-        config_ref.maxY = dev_info.maxY;
-
-        LS_LOGD_TAG("Touch", "选择设备 path=%s name=%s direct=%d pointer=%d range=%dx%d", dev_info.path, dev_info.name, dev_info.isDirect ? 1 : 0, dev_info.isPointer ? 1 : 0, dev_info.maxX, dev_info.maxY);
-
-        // 必须在 Touch_Init() 中创建线程。很多调用方会在 main() 内先 fork()
-        // 守护化；若在线程池全局构造阶段提前创建线程，fork 后子进程只保留
-        // 调用线程，继承的线程池将永远没有 worker 来消费触摸任务。
-        config_ref.task = std::thread(deviceHandlerThread, config_ref.deviceIndex, config_ref.deviceFd, config_ref.maxX, config_ref.maxY);
+        if (fd >= 0) close(std::exchange(fd, -1)); // close 同时释放 EVIOCGRAB。
     }
-    return true;
-}
 
-// 1启用独占，0取消独占
-inline void SetInputBlocking(bool block)
-{
-    for (const auto &dev : devices)
+public:
+    TouchInput() = default;
+    TouchInput(const TouchInput &) = delete;
+    TouchInput &operator=(const TouchInput &) = delete;
+    ~TouchInput() { shutdown(); }
+
+    // 更新屏幕信息，输入线程按同一组尺寸和方向换算坐标。
+    void setScreen(int w, int h, int orientation)
     {
-        if (dev.deviceFd >= 0) ioctl(dev.deviceFd, EVIOCGRAB, block ? 1 : 0);
+        std::lock_guard lock(mutex);
+        width = w;
+        height = h;
+        rotation = orientation;
     }
-}
 
-// 检测是否有手指在矩形区域内
-inline bool IsUserTouchingRect(float rx, float ry, float rw, float rh)
-{
-    std::lock_guard<std::mutex> lock(touch_mutex);
-    for (size_t d = 0; d < devices.size(); ++d)
+    int start()
     {
-        for (int f = 0; f < MAX_FINGERS; ++f)
+        int status = 0;
+        std::lock_guard startLock(mutex);
+        if (fd >= 0) return status = workerStatus;
+        DIR *dir = opendir("/dev/input");
+        if (!dir) return status = -errno;
+
+        struct Candidate
         {
-            if (fingers[d][f].isDown)
+            int fd = -1, number = 0, minX = 0, minY = 0, maxX = 0, maxY = 0, slotCount = 0;
+            bool direct = false, pointer = false;
+            int64_t area = 0;
+        } best;
+        int unavailable = -ENODEV;
+        while (const auto *entry = readdir(dir))
+        {
+            if (strncmp(entry->d_name, "event", 5) != 0) continue;
+            Candidate candidate;
+            const char *end = entry->d_name + strlen(entry->d_name);
+            const auto number = std::from_chars(entry->d_name + 5, end, candidate.number);
+            if (number.ec != std::errc{} || number.ptr != end || candidate.number < 0) continue;
+            // 非阻塞读取配合 poll；没有新事件时不让 read 阻塞退出。
+            candidate.fd = openat(dirfd(dir), entry->d_name, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (candidate.fd < 0)
             {
-                int touchX = fingers[d][f].x;
-                int touchY = fingers[d][f].y;
-
-                if (touchX >= rx && touchX <= rx + rw && touchY >= ry && touchY <= ry + rh)
-                {
-                    return true;
-                }
+                if (errno == EACCES || errno == EPERM) unavailable = -errno;
+                continue;
             }
+
+            uint8_t absBits[(ABS_MAX + 8) / 8]{};
+            input_absinfo x{}, y{}, slotAxis{};
+            if (ioctl(candidate.fd, EVIOCGBIT(EV_ABS, sizeof(absBits)), absBits) < 0 || !hasBit(ABS_MT_SLOT, absBits) || !hasBit(ABS_MT_POSITION_X, absBits) || !hasBit(ABS_MT_POSITION_Y, absBits) || ioctl(candidate.fd, EVIOCGABS(ABS_MT_POSITION_X), &x) < 0 || ioctl(candidate.fd, EVIOCGABS(ABS_MT_POSITION_Y), &y) < 0 || ioctl(candidate.fd, EVIOCGABS(ABS_MT_SLOT), &slotAxis) < 0 || slotAxis.minimum != 0 || slotAxis.maximum < 0 || slotAxis.maximum > 65535 || x.maximum <= x.minimum || y.maximum <= y.minimum)
+            {
+                close(candidate.fd);
+                continue;
+            }
+            candidate.slotCount = slotAxis.maximum + 1;
+            candidate.minX = x.minimum;
+            candidate.minY = y.minimum;
+            candidate.maxX = x.maximum;
+            candidate.maxY = y.maximum;
+            candidate.area = static_cast<int64_t>(x.maximum) * y.maximum;
+            uint8_t props[(INPUT_PROP_MAX + 8) / 8]{};
+            if (ioctl(candidate.fd, EVIOCGPROP(sizeof(props)), props) >= 0)
+            {
+                candidate.direct = hasBit(INPUT_PROP_DIRECT, props);
+                candidate.pointer = hasBit(INPUT_PROP_POINTER, props);
+            }
+            // 依据 EVIOCGPROP 优先选直接触摸、非指针设备；同类取轴面积较大、event 编号较小者。
+            if (best.fd < 0 || std::tuple(candidate.direct, !candidate.pointer, candidate.area, -candidate.number) > std::tuple(best.direct, !best.pointer, best.area, -best.number)) std::swap(best, candidate);
+            if (candidate.fd >= 0) close(candidate.fd);
+        }
+        closedir(dir);
+        if (best.fd < 0) return status = unavailable;
+        struct CloseOnReturn
+        {
+            int &fd;
+            ~CloseOnReturn() { if (fd >= 0) close(fd); }
+        } closeOnReturn{best.fd};
+        LS_LOGD_TAG("Touch", "选择设备 /dev/input/event%d range=%dx%d", best.number, best.maxX, best.maxY);
+        if (ioctl(best.fd, EVIOCGRAB, 1) < 0) return status = -errno;
+
+        try
+        {
+            reported.reserve(best.slotCount);
+            frame.reserve(best.slotCount);
+            // 在初始化时启动线程，而非静态初始化时启动：调用方可能在此之前 fork。
+            worker = std::jthread(ReadEvents, this, best.fd, best.minX, best.minY,
+                                  double(best.maxX) - best.minX, double(best.maxY) - best.minY,
+                                  std::vector<Slot>(best.slotCount), std::vector<Contact>(best.slotCount));
+        }
+        catch (const std::system_error &error)
+        {
+            status = -error.code().value();
+        }
+        catch (const std::bad_alloc &)
+        {
+            status = -ENOMEM;
+        }
+        if (status != 0) return status;
+        fd = std::exchange(best.fd, -1);
+        blocking = true;
+        return status;
+    }
+
+    // 可从任意线程读取；返回本实例最近一次完整上报中仍按下的触点副本。
+    [[nodiscard]] std::vector<TouchPoint> snapshot() const
+    {
+        std::vector<TouchPoint> points;
+        int w, h, orientation;
+        for (;;)
+        {
+            std::unique_lock lock(mutex);
+            if (width <= 0 || height <= 0) return {};
+            if (points.capacity() < reported.size())
+            {
+                const size_t capacity = reported.capacity();
+                lock.unlock();
+                points.reserve(capacity);
+                continue; // 扩容期间状态可能改变，重新获取完整快照。
+            }
+            w = width;
+            h = height;
+            orientation = rotation;
+            for (const auto &contact : reported) points.push_back({contact.slot, contact.pos.x, contact.pos.y});
+            break;
+        }
+        for (auto &point : points)
+        {
+            const auto p = screenPosition({point.x, point.y}, w, h, orientation);
+            point.x = p.x;
+            point.y = p.y;
+        }
+        return points;
+    }
+
+    int setBlocking(bool block)
+    {
+        int status = 0;
+        std::lock_guard lock(mutex);
+        if (fd < 0) return status = -ENODEV;
+        if (workerStatus != 0) return status = workerStatus;
+        if (block == blocking) return status;
+        // EVIOCGRAB：1 启用独占，0 取消独占。
+        if (ioctl(fd, EVIOCGRAB, static_cast<int>(block)) < 0) return status = -errno;
+        blocking = block;
+        return status;
+    }
+
+    // 在渲染线程的 ImGui::NewFrame 之前消费已提交的触摸事件。
+    void updateImGui()
+    {
+        frame.clear();
+        int w, h, orientation;
+        size_t eventCount;
+        {
+            std::lock_guard lock(mutex);
+            w = width;
+            h = height;
+            orientation = rotation;
+            // frame 已按设备 slot 数预分配，此处只复制，不分配或调用 ImGui。
+            for (const auto &contact : reported) frame.push_back(contact);
+            eventCount = count;
+            std::copy_n(pending.begin(), eventCount, dispatch.begin());
+            count = 0;
+        }
+        for (auto &contact : frame) contact.pos = screenPosition(contact.pos, w, h, orientation);
+        if (!eventCount) return;
+        ImGuiIO &io = ImGui::GetIO();
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        for (size_t i = 0; i < eventCount; ++i)
+        {
+            const auto &event = dispatch[i];
+            if (event.kind == Event::Position) io.AddMousePosEvent(event.x, event.y);
+            else io.AddMouseButtonEvent(0, event.kind == Event::Press);
         }
     }
-    return false;
-}
 
-inline void Touch_Shutdown()
-{
-    if (!Touch_initialized.load(std::memory_order_acquire)) return;
+    // 仅在绘制回调中使用；点与矩形使用同一帧，不读取正在写入的输入状态。
+    void drawTouchDebug(ImDrawList &draw, const TouchDebugView &view) const
+    {
+        bool hit = false;
+        for (const auto &[slot, p] : frame)
+        {
+            if (view.showRect && p.x >= view.rectMin.x && p.x < view.rectMax.x && p.y >= view.rectMin.y && p.y < view.rectMax.y) hit = true;
+            if (!view.showPoints) continue;
+            draw.AddCircleFilled(p, 15.0f, IM_COL32(255, 0, 0, 200));
+            char label[24];
+            std::snprintf(label, sizeof(label), "ID:%d", slot);
+            draw.AddText({p.x + 10.0f, p.y}, IM_COL32_WHITE, label);
+        }
+        if (view.showRect)
+        {
+            draw.AddRect(view.rectMin, view.rectMax, hit ? IM_COL32(255, 200, 0, 255) : IM_COL32(0, 255, 0, 200), 0.0f, 2.0f);
+            if (hit && view.hitLabel) draw.AddText(view.rectMin, IM_COL32_WHITE, view.hitLabel);
+        }
+    }
+};
 
-    SetInputBlocking(false);
-    Touch_initialized.store(false, std::memory_order_release);
-
-    for (size_t i = 0; i < devices.size(); ++i)
-        if (devices[i].task.joinable()) devices[i].task.join();
-    devices.clear();
-
-    std::lock_guard<std::mutex> lock(touch_mutex);
-    pendingTouchEvents.clear();
-    for (auto &deviceFingers : fingers)
-        for (TouchPoint &finger : deviceFingers) finger = {};
-}
+inline std::unique_ptr<TouchInput> gTouchInput = nullptr;

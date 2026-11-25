@@ -101,6 +101,7 @@ static void sgame_reap_exited_targets(void)
 static struct task_struct *sgame_find_client(void)
 {
     struct task_struct *task, *candidate = NULL;
+    struct task_struct *owner = READ_ONCE(ls_process_task);
 
     rcu_read_lock();
     for_each_process(task) {
@@ -110,6 +111,8 @@ static struct task_struct *sgame_find_client(void)
         if (strcmp(comm, "LS") || task->start_time <= sgame_client_start_time)
             continue;
         if (atomic_read(&task->signal->live) == 0) continue;
+        if (owner && rcu_dereference(task->real_parent)->tgid == owner->tgid)
+            continue;
         if (!candidate || task->start_time > candidate->start_time)
             candidate = task;
     }
@@ -131,6 +134,7 @@ static void sgame_connect_client(struct task_struct *task)
 
     mm = get_task_mm(task);
     if (!mm) goto put_task;
+    log_connect_candidate(task->tgid, READ_ONCE(task->start_time), mm);
     pages = kmalloc_array(nr_pages, sizeof(*pages), GFP_KERNEL);
     if (!pages) goto put_mm;
     mmap_read_lock(mm);

@@ -1,21 +1,23 @@
 {
   "upstream_repository": "https://github.com/lsnbm/Linux-android-arm64",
-  "upstream_commit": "df4ef96c90365c0ba7e638a8b7fadbe245c701f4",
+  "upstream_commit": "0a33fa0ef468873a2c94b2876eb88a6dfb482ec9",
   "project_import_commit": "79bf279",
   "old_archive_commit": "4eb532cb5163a204f54e0f5f0ba0b9edf3e2aed8",
   "preserved_upstream_sha256": {
-    "android/jni/driver/driver.h": "8fd9346dc528389501cc203a66a0890c12ea4e7b07f4d0ed26a919fdcedfc35f",
-    "android/jni/driver/driver_loader.h": "36a11273573964106fd8e80a6f40699be1a255f8e2f27d41d5f9054a1f8437e6",
+    "android/jni/driver/driver.h": "a3e8cf87b4cc1730232bbf71dea6db1c608fa859783c67389b8673f50ef2b25b",
+    "android/jni/driver/driver_loader.h": "2af0ee64637c12f167b69e84e41d205240f88d611ecc060cba040ac9802bb382",
     "lsdriver/io_version/io_struct.h": "ab71daa033cab06d84134671789ed01cf23086b71871dd934484a5dffc6c0ee4",
-    "lsdriver/io_version/version.h": "d7b2bfa18555ec47bddeb5282d760518435c296360e2c036d20b1a17daf20f18",
-    "lsdriver/hide_task.h": "96840772056d3d8cb118f605a62d0fd5145507df14b987592c6158dbe9c46d8b",
+    "lsdriver/io_version/version.h": "1a998bebeafabc52ed8c7eb5649fcea61590a53d51029283d5416f58471afd7a",
+    "lsdriver/hide_task.h": "c837cf314e71e5eb03a41c81fe8c22eff2fb5a4fcc6cf373a70c07cc64d71040",
     "lsdriver/hide_kgsl.h": "7768d079f260cbbcf4f7fd4f3917b0cc8f837ce54cb035c10329c1cba090457c",
     "lsdriver/hide_proc.h": "bcbf8126e8115ff85f36ada0ceb6c961417e5805c0b1932554b4d311a24f96de",
     "lsdriver/arm64_ptedbg.h": "57a5519205a9720878d880faab929b04982a17ba5e72fcd70542c503a1a1fe88"
   },
   "modified_upstream_files": {
-    "lsdriver/arm64_ptedbg-20260822-000439.h": "Prepare/publish before arming; serialize exception shadow reads with teardown; use mmap trylock and session generation for exception rollback"
+    "lsdriver/arm64_ptedbg-20260822-000439.h": "Prepare/publish before arming; serialize exception shadow reads with teardown; use mmap trylock and session generation for exception rollback",
+    "lsdriver/lsdriver.c": "Retain project Swap/simulation dispatch, serialized reference ownership and deferred exit cleanup; integrate upstream client diagnostics and signal tracing while preserving existing exception hooks.",
+    "lsdriver/arm64_dptdbg.h": "Retain project page-table allocation provenance and 5.10 compatibility with upstream locking and CFI fixes."
   },
-  "previous_upstream_commit": "587c3bdfa29b3523f79f5ce2bf6f3c1ac3087e51",
+  "previous_upstream_commit": "df4ef96c90365c0ba7e638a8b7fadbe245c701f4",
   "cpu_render": "disabled-upstream"
 }

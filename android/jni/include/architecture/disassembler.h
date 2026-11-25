@@ -1,12 +1,14 @@
 #pragma once
 #include <algorithm>
+#include <memory>
+#include <stdexcept>
 #include <vector>
-#include <string>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <cctype>
 #include "../../capstone/include/capstone/capstone.h"
+#include "../../logger/logger.h"
 
 namespace Disasm
 {
@@ -25,12 +27,11 @@ namespace Disasm
     {
     private:
         csh m_handle;
-        bool m_valid;
 
     public:
         static constexpr size_t DEFAULT_MAX_INSTRUCTIONS = 500;
 
-        Disassembler() : m_handle(0), m_valid(false)
+        Disassembler() : m_handle(0)
         {
             int major = 0, minor = 0;
             cs_version(&major, &minor);
@@ -39,20 +40,25 @@ namespace Disasm
             if (!cs_support(CS_ARCH_AARCH64))
             {
                 LS_LOGE_TAG("Disassembler", "Capstone 库未编译 ARM64/AArch64 支持");
-                return;
+                throw std::runtime_error("Capstone 未编译 ARM64 支持");
             }
 
             cs_err err = cs_open(CS_ARCH_AARCH64, CS_MODE_LITTLE_ENDIAN, &m_handle);
             if (err != CS_ERR_OK)
             {
                 LS_LOGE_TAG("Disassembler", "ARM64 初始化失败: %s", cs_strerror(err));
-                return;
+                throw std::runtime_error(cs_strerror(err));
             }
 
-            cs_option(m_handle, CS_OPT_DETAIL, CS_OPT_OFF);
-            cs_option(m_handle, CS_OPT_SKIPDATA, CS_OPT_ON);
+            err = cs_option(m_handle, CS_OPT_DETAIL, CS_OPT_OFF);
+            if (err == CS_ERR_OK) err = cs_option(m_handle, CS_OPT_SKIPDATA, CS_OPT_ON);
+            if (err != CS_ERR_OK)
+            {
+                LS_LOGE_TAG("Disassembler", "ARM64 选项初始化失败: %s", cs_strerror(err));
+                cs_close(&m_handle);
+                throw std::runtime_error(cs_strerror(err));
+            }
 
-            m_valid = true;
             LS_LOGI_TAG("Disassembler", "初始化成功: ARM64");
         }
 
@@ -71,12 +77,6 @@ namespace Disasm
         {
             std::vector<DisasmLine> results;
 
-            if (!m_valid)
-            {
-                LS_LOGE_TAG("Disassembler", "反汇编器未初始化");
-                return results;
-            }
-
             if (address & 0x3)
             {
                 LS_LOGE_TAG("Disassembler", "地址未 4 字节对齐: 0x%llX", (unsigned long long)address);
@@ -84,7 +84,7 @@ namespace Disasm
             }
 
             cs_insn *insn = nullptr;
-            size_t count = cs_disasm(m_handle, buffer, size, address, maxCount, &insn);
+            const size_t count = cs_disasm(m_handle, buffer, size, address, maxCount, &insn);
 
             if (count == 0)
             {
@@ -92,19 +92,22 @@ namespace Disasm
                 return results;
             }
 
+            const auto release = [count](cs_insn *items) { cs_free(items, count); };
+            const std::unique_ptr<cs_insn[], decltype(release)> instructions(insn, release);
             if (logInstructions) LS_LOGI_TAG("Disassembler", "反汇编 %zu 条指令", count);
             results.reserve(count);
             for (size_t i = 0; i < count; i++)
             {
-                DisasmLine line{};
+                auto &line = results.emplace_back();
+                const auto &instruction = instructions[i];
                 line.valid = true;
-                line.address = insn[i].address;
-                line.size = insn[i].size;
+                line.address = instruction.address;
+                line.size = instruction.size;
 
-                memcpy(line.bytes, insn[i].bytes, std::min(static_cast<size_t>(insn[i].size), sizeof(line.bytes)));
+                memcpy(line.bytes, instruction.bytes, std::min(line.size, sizeof(line.bytes)));
 
-                strncpy(line.mnemonic, insn[i].mnemonic, sizeof(line.mnemonic) - 1);
-                strncpy(line.op_str, insn[i].op_str, sizeof(line.op_str) - 1);
+                strncpy(line.mnemonic, instruction.mnemonic, sizeof(line.mnemonic) - 1);
+                strncpy(line.op_str, instruction.op_str, sizeof(line.op_str) - 1);
 
                 for (char *p = line.mnemonic; *p; ++p) *p = std::toupper(static_cast<unsigned char>(*p));
                 for (char *p = line.op_str; *p; ++p) *p = std::toupper(static_cast<unsigned char>(*p));
@@ -113,10 +116,10 @@ namespace Disasm
                 {
                     char bytesStr[48] = {};
                     int pos = 0;
-                    const size_t byteCount = std::min(static_cast<size_t>(insn[i].size), (sizeof(bytesStr) - 1) / 3);
+                    const size_t byteCount = std::min(line.size, (sizeof(bytesStr) - 1) / 3);
                     for (size_t j = 0; j < byteCount; ++j)
                     {
-                        const int written = snprintf(bytesStr + pos, sizeof(bytesStr) - static_cast<size_t>(pos), "%02X ", insn[i].bytes[j]);
+                        const int written = snprintf(bytesStr + pos, sizeof(bytesStr) - static_cast<size_t>(pos), "%02X ", instruction.bytes[j]);
                         if (written <= 0) break;
                         pos += std::min(written, static_cast<int>(sizeof(bytesStr) - 1 - static_cast<size_t>(pos)));
                     }
@@ -124,13 +127,12 @@ namespace Disasm
                     LS_LOGI_TAG("Disassembler", "0x%llX: %-12s %-7s %s", (unsigned long long)line.address, bytesStr, line.mnemonic, line.op_str);
                 }
 
-                results.push_back(line);
             }
 
-            cs_free(insn, count);
             return results;
         }
 
     };
 
+    inline std::unique_ptr<Disassembler> gDisassembler = nullptr;
 } // namespace Disasm

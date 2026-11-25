@@ -1,10 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <thread>
 
+#include "../../android_surface/surface_control_manager.h"
 #include "../../driver/driver.h"
 
 // 单点连击测试：在 (x,y) 连续点击 taps 次
@@ -69,14 +71,14 @@ inline void DoPinchTest(int screenW, int screenH)
 
 inline int RunTouchTest()
 {
-    int screenW = 1080, screenH = 2340;
-    if (FILE *pipe = popen("wm size", "r"))
+    int status = 0;
+    const auto display = android::gSurfaceControl->GetDisplayInfo(android::SurfaceControlManager::DisplayAxes::Natural);
+    if (display.width <= 0 || display.height <= 0)
     {
-        char line[128] = {};
-        if (fgets(line, sizeof(line), pipe) && sscanf(line, "Physical size: %dx%d", &screenW, &screenH) != 2) sscanf(line, "Override size: %dx%d", &screenW, &screenH);
-        pclose(pipe);
+        LS_LOGE_TAG("TouchTest", "读取屏幕尺寸失败，取消触摸测试");
+        return status = -EIO;
     }
-
+    const int screenW = display.width, screenH = display.height;
     LS_LOGI_TAG("TouchTest", "屏幕逻辑尺寸: %dx%d", screenW, screenH);
 
     // 1) 单击测试：屏幕左上 1/4 区域
@@ -106,5 +108,5 @@ inline int RunTouchTest()
     DoTapTest(0, screenW / 2, screenH / 2, screenW, screenH, 50);
 
     LS_LOGI_TAG("TouchTest", "全部测试序列执行完毕");
-    return 0;
+    return status;
 }

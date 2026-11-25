@@ -1,220 +1,315 @@
 #pragma once
 
-#include "../logger/logger.h"
-#include <atomic>
-#include <cstdio>
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <optional>
 
 #include <android/native_window.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES/gl.h>
-#include <GLES3/gl3ext.h>
-#include <GLES3/gl32.h>
-#include <GLES3/gl3platform.h>
+#include <GLES3/gl3.h>
 
 // Android/ImGui 依赖
+#include "android_imgui_input/imgui_touch_input.h"
+#include "android_surface/surface_control_manager.h"
 #include "imgui/backends/imgui_impl_android.h"
 #include "imgui/backends/imgui_impl_opengl3.h"
 #include "imgui/imgui.h"
-#include "imgui/imgui_internal.h"
-#include "android_imgui_input/imgui_touch_input.h"
-#include "android_surface/surface_control_manager.h"
-#include "font/oppo_font.h"
-#include <chrono>
+#include "logger/logger.h"
 
 // OpenGL ES 后端实现
-namespace RenderGL
+class OpenGLRenderer
 {
-    static EGLDisplay display = EGL_NO_DISPLAY;
-    static EGLConfig config;
-    static EGLSurface surface = EGL_NO_SURFACE;
-    static EGLContext context = EGL_NO_CONTEXT;
+    EGLDisplay display = EGL_NO_DISPLAY;
+    EGLSurface surface = EGL_NO_SURFACE;
+    EGLContext context = EGL_NO_CONTEXT;
+    ImGuiContext *imgui_context = nullptr;
+    bool android_backend_initialized = false;
+    bool opengl_backend_initialized = false;
+    ANativeWindow *native_window = nullptr;
+    android::SurfaceControlManager::DisplayInfo displayInfo{};
+    std::chrono::steady_clock::time_point lastDisplayInfoQuery_{};
 
-    static ANativeWindow *native_window = nullptr;
-    static android::SurfaceControlManager::DisplayInfo displayInfo{};
-    static std::chrono::steady_clock::time_point s_lastDisplayInfoQuery{};
-    static bool imgui_context_created = false;
-    static bool android_backend_initialized = false;
-    static bool opengl_backend_initialized = false;
-
-    inline void shutdown();
-
-    inline bool init(bool allowCapture)
+    struct ImGuiContextScope
     {
-        if (imgui_context_created) return true;
+        ImGuiContext *previous = ImGui::GetCurrentContext();
+        explicit ImGuiContextScope(ImGuiContext *current) { ImGui::SetCurrentContext(current); }
+        ~ImGuiContextScope() { ImGui::SetCurrentContext(previous); }
+    };
 
-        LS_LOGD_TAG("Render", "开始初始化 EGL 和 GUI");
-        displayInfo = android::SurfaceControlManager::GetDisplayInfo();
+    struct RecordSurfaceState
+    {
+        android::SurfaceControlManager::RecordDisplayInfo display;
+        android::SurfaceControlManager::DisplayInfo source;
+    };
+    std::optional<RecordSurfaceState> recordSurface_;
+    std::optional<android::SurfaceControlManager::RecordDisplayInfo> cachedRecordDisplay_;
+    std::optional<android::SurfaceControlManager::RecordDisplayInfo> pendingRecordDisplay_;
+    bool recordDisplayMissed_ = false;
+    std::chrono::steady_clock::time_point lastRecordDisplayScan_{};
+    bool allowCapture_ = false;
+
+    static bool SameRecordDisplay(const android::SurfaceControlManager::RecordDisplayInfo &lhs, const android::SurfaceControlManager::RecordDisplayInfo &rhs)
+    {
+        return lhs.layerStack == rhs.layerStack && lhs.orientation == rhs.orientation && lhs.layerStackRect == rhs.layerStackRect && lhs.displayRect == rhs.displayRect;
+    }
+
+    void CleanupRecordSurface()
+    {
+        if (!recordSurface_) return;
+        if (android::gSurfaceControl) android::gSurfaceControl->DestroyMirrorOnLayerStack(native_window);
+        recordSurface_.reset();
+    }
+
+    void shutdown()
+    {
+        CleanupRecordSurface();
+        cachedRecordDisplay_.reset();
+        pendingRecordDisplay_.reset();
+        recordDisplayMissed_ = false;
+        lastRecordDisplayScan_ = {};
+
+        if (imgui_context)
+        {
+            ImGuiContextScope scope{imgui_context};
+            if (scope.previous == imgui_context) scope.previous = nullptr;
+            if (opengl_backend_initialized) ImGui_ImplOpenGL3_Shutdown();
+            if (android_backend_initialized) ImGui_ImplAndroid_Shutdown();
+            ImGui::DestroyContext(imgui_context);
+            imgui_context = nullptr;
+        }
+        opengl_backend_initialized = false;
+        android_backend_initialized = false;
+
+        if (display != EGL_NO_DISPLAY)
+        {
+            if (context != EGL_NO_CONTEXT && eglGetCurrentContext() == context)
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
+            if (surface != EGL_NO_SURFACE) eglDestroySurface(display, surface);
+            eglTerminate(display);
+            display = EGL_NO_DISPLAY;
+            context = EGL_NO_CONTEXT;
+            surface = EGL_NO_SURFACE;
+        }
+        if (native_window)
+        {
+            if (android::gSurfaceControl) android::gSurfaceControl->Destroy(native_window);
+            ANativeWindow_release(native_window);
+            native_window = nullptr;
+        }
+    }
+
+public:
+    OpenGLRenderer() = default;
+    OpenGLRenderer(const OpenGLRenderer &) = delete;
+    OpenGLRenderer &operator=(const OpenGLRenderer &) = delete;
+    ~OpenGLRenderer() { shutdown(); }
+
+    template <class Setup> int init(bool allowCapture, Setup &&setup, const char *windowName = "ImGui", int32_t windowType = -1)
+    {
+        int status = 0;
+        if (opengl_backend_initialized) return status;
+        if (!gTouchInput || !android::gSurfaceControl || !android::gBinderDump) return status = -ENODEV;
+        // 不借用外部 context；失败回滚及退出只清理本实例创建的 context。
+        if (ImGui::GetCurrentContext()) return status = -EBUSY;
+        struct Rollback
+        {
+            OpenGLRenderer *renderer;
+            ~Rollback() { if (renderer) renderer->shutdown(); }
+        } rollback{this};
+
+        allowCapture_ = allowCapture;
+        displayInfo = android::gSurfaceControl->GetDisplayInfo();
+        lastDisplayInfoQuery_ = std::chrono::steady_clock::now();
         if (displayInfo.width <= 0 || displayInfo.height <= 0)
         {
             displayInfo.width = 1080;
             displayInfo.height = 2340;
             displayInfo.orientation = 0;
         }
-
-        // 初始化触摸屏幕参数 (重要)
-        UpdateScreenData(displayInfo.width, displayInfo.height, displayInfo.orientation);
-
-        // 重要：Lark SurfaceControl 只创建一次，旋转时由系统显示投影改变方向，不重建 layer。
-        // buffer 必须保持长边方形；不要在旋转时用 displayInfo.width/height 交换 ANativeWindow buffer，
-        // 因为 setBuffersGeometry 只改 buffer 像素尺寸，不改旧 layer 几何，SurfaceFlinger 会将画面拉伸。
-        // displayInfo.width/height 仍是实际屏幕逻辑尺寸，继续用于 ImGui、触摸和 ESP 坐标计算。
-        const int w = displayInfo.width;
-        const int h = displayInfo.height;
-        const int max_side = (h > w ? h : w);
-        native_window = android::SurfaceControlManager::Create("Lark", max_side, max_side, !allowCapture);
-        if (!native_window) return false;
-
+        // 主 SurfaceControl 只创建一次，旋转时由系统显示投影改变方向，不重建 layer。
+        // 缓冲保持长边方形：setBuffersGeometry 只改缓冲像素尺寸，不改图层几何，旋转时交换宽高会拉伸画面。
+        // displayInfo.width/height 仍是屏幕逻辑尺寸，用于界面布局和触摸坐标。
+        const int max_side = std::max(displayInfo.width, displayInfo.height);
+        native_window = android::gSurfaceControl->Create(windowName, max_side, max_side, !allowCapture, windowType);
+        if (!native_window)
+        {
+            LS_LOGE_TAG("RenderGL", "创建 ANativeWindow 失败");
+            status = -ENODEV;
+            return status;
+        }
         ANativeWindow_acquire(native_window);
 
         display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (display == EGL_NO_DISPLAY || eglInitialize(display, 0, 0) != EGL_TRUE)
+        if (display == EGL_NO_DISPLAY || !eglInitialize(display, nullptr, nullptr))
         {
-            shutdown();
-            return false;
+            status = eglGetError();
+            return status;
         }
 
+        EGLConfig config{};
         EGLint num_config = 0;
-        const EGLint attribList[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_STENCIL_SIZE, 8, EGL_NONE};
-
-        if (eglChooseConfig(display, attribList, &config, 1, &num_config) != EGL_TRUE || num_config <= 0)
-        {
-            shutdown();
-            return false;
-        }
+        const EGLint attribList[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_STENCIL_SIZE, 8, EGL_NONE};
+        if (!eglChooseConfig(display, attribList, &config, 1, &num_config)) status = eglGetError();
+        else if (num_config == 0) status = EGL_BAD_CONFIG;
+        if (status != 0) return status;
 
         EGLint egl_format = 0;
-        if (eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &egl_format) != EGL_TRUE)
+        if (!eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &egl_format))
         {
-            shutdown();
-            return false;
+            status = eglGetError();
+            return status;
         }
-        ANativeWindow_setBuffersGeometry(native_window, 0, 0, egl_format);
+        status = ANativeWindow_setBuffersGeometry(native_window, 0, 0, egl_format);
+        if (status != 0) return status;
 
-        const EGLint attrib_list[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-        context = eglCreateContext(display, config, EGL_NO_CONTEXT, attrib_list);
+        const EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+        context = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttribs);
         if (context == EGL_NO_CONTEXT)
         {
-            shutdown();
-            return false;
+            status = eglGetError();
+            return status;
         }
         surface = eglCreateWindowSurface(display, config, native_window, nullptr);
-        if (surface == EGL_NO_SURFACE)
+        if (surface == EGL_NO_SURFACE || !eglMakeCurrent(display, surface, surface, context))
         {
-            shutdown();
-            return false;
-        }
-
-        if (!eglMakeCurrent(display, surface, surface, context))
-        {
-            shutdown();
-            return false;
+            status = eglGetError();
+            return status;
         }
 
         // 初始化 ImGui
         IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        imgui_context_created = true;
-        ImGuiIO &io = ImGui::GetIO();
-        io.IniFilename = NULL;
-
+        imgui_context = ImGui::CreateContext();
+        if (!imgui_context) return status = -ENOMEM;
         android_backend_initialized = ImGui_ImplAndroid_Init(native_window);
+        if (!android_backend_initialized)
+        {
+            status = -EIO;
+            return status;
+        }
         opengl_backend_initialized = ImGui_ImplOpenGL3_Init("#version 300 es");
-        if (!android_backend_initialized || !opengl_backend_initialized)
+        if (!opengl_backend_initialized)
         {
-            shutdown();
-            return false;
+            status = -EIO;
+            return status;
         }
 
-        ImFontConfig font_cfg;
-        font_cfg.SizePixels = 31.0f;
-        font_cfg.FontDataOwnedByAtlas = false;
-        io.Fonts->AddFontFromMemoryTTF((void *)OPPOSans_H, OPPOSans_H_size, 31.0f, &font_cfg, io.Fonts->GetGlyphRangesChineseFull());
-
-        ImGui::GetStyle().ScaleAllSizes(3.0f);
-
-        if (!Touch_Init())
+        // 回调只配置当前由本实例持有的 context，不切换或销毁它。
+        setup();
+        // 在输入线程启动前设置触摸坐标所用的屏幕尺寸和方向。
+        gTouchInput->setScreen(displayInfo.width, displayInfo.height, displayInfo.orientation);
+        status = gTouchInput->start();
+        if (status != 0)
         {
-            shutdown();
-            return false;
+            LS_LOGE_TAG("RenderGL", "初始化触摸输入失败: %d", status);
+            return status;
         }
-        return true;
+        rollback.renderer = nullptr;
+        return status;
     }
 
-    inline void drawBegin()
+    template <typename Draw> int drawFrame(Draw &&draw)
     {
-        if (!imgui_context_created || !opengl_backend_initialized) return;
+        int status = 0;
+        if (!opengl_backend_initialized || !gTouchInput || !android::gSurfaceControl)
+        {
+            status = -ENODEV;
+            return status;
+        }
+        ImGuiContextScope scope{imgui_context};
 
         const auto now = std::chrono::steady_clock::now();
-        if (s_lastDisplayInfoQuery == std::chrono::steady_clock::time_point{} || now - s_lastDisplayInfoQuery >= std::chrono::milliseconds(250))
+        if (now - lastDisplayInfoQuery_ >= std::chrono::milliseconds(250))
         {
-            s_lastDisplayInfoQuery = now;
-            const auto updatedDisplayInfo = android::SurfaceControlManager::GetDisplayInfo();
-            if (updatedDisplayInfo.width > 0 && updatedDisplayInfo.height > 0)
+            lastDisplayInfoQuery_ = now;
+            const auto updated = android::gSurfaceControl->GetDisplayInfo();
+            if (updated.width > 0 && updated.height > 0 &&
+                (updated.width != displayInfo.width || updated.height != displayInfo.height || updated.orientation != displayInfo.orientation))
             {
-                displayInfo = updatedDisplayInfo;
+                displayInfo = updated;
+                gTouchInput->setScreen(displayInfo.width, displayInfo.height, displayInfo.orientation);
+                // 不等待常规轮询周期，下一次呈现后立即刷新录屏投影。
+                lastRecordDisplayScan_ = {};
             }
         }
-        if (displayInfo.width <= 0 || displayInfo.height <= 0)
-        {
-            displayInfo.orientation = static_cast<int32_t>(orientation.load(std::memory_order_relaxed));
-            displayInfo.width = static_cast<int32_t>(screenWidth.load(std::memory_order_relaxed));
-            displayInfo.height = static_cast<int32_t>(screenHeight.load(std::memory_order_relaxed));
-        }
 
-        if (orientation.load(std::memory_order_relaxed) != static_cast<uint32_t>(displayInfo.orientation)) UpdateScreenData(displayInfo.width, displayInfo.height, displayInfo.orientation);
-
-        Touch_UpdateImGui();
+        gTouchInput->updateImGui();
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplAndroid_NewFrame();
         ImGui::NewFrame();
-    }
-
-    inline void drawEnd()
-    {
-        if (!imgui_context_created || !opengl_backend_initialized) return;
-
+        const bool block = draw(displayInfo.width, displayInfo.height);
         ImGui::Render();
-        if (display == EGL_NO_DISPLAY || surface == EGL_NO_SURFACE) return;
+        status = gTouchInput->setBlocking(block);
+        if (status != 0) return status;
 
-        ImGuiIO &io = ImGui::GetIO();
-        glViewport(0.0f, 0.0f, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+        // EGL 管理窗口缓冲区的大小变化，不需要像 Vulkan 一样重建交换链。
+        const auto &size = ImGui::GetIO().DisplaySize;
+        glViewport(0, 0, static_cast<GLsizei>(size.x), static_cast<GLsizei>(size.y));
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        if (eglSwapBuffers(display, surface) != EGL_TRUE)
+        if (!eglSwapBuffers(display, surface))
         {
-            EGLint error = eglGetError();
-            LS_LOGE_TAG("Render", "eglSwapBuffers 失败: 0x%x", error);
+            status = eglGetError();
+            return status;
         }
+
+        // 检测录屏虚拟显示的目标 layerStack，将主绘制层镜像到该显示；镜像不可用不终止主帧。
+        if (!allowCapture_) return status;
+        const auto presentedAt = std::chrono::steady_clock::now();
+        if (lastRecordDisplayScan_ == std::chrono::steady_clock::time_point{} || presentedAt - lastRecordDisplayScan_ >= std::chrono::seconds(2))
+        {
+            lastRecordDisplayScan_ = presentedAt;
+            android::SurfaceControlManager::RecordDisplayInfo scanned{};
+            if (android::gSurfaceControl->FindRecordDisplay(&scanned, displayInfo.width, displayInfo.height) != 0)
+            {
+                if (recordDisplayMissed_) cachedRecordDisplay_.reset();
+                recordDisplayMissed_ = true;
+                pendingRecordDisplay_.reset();
+            }
+            else
+            {
+                recordDisplayMissed_ = false;
+                // 已有镜像时，连续两次扫描到同一新目标才切换 layerStack。
+                if (!recordSurface_ || !cachedRecordDisplay_ || scanned.layerStack == cachedRecordDisplay_->layerStack ||
+                    (pendingRecordDisplay_ && SameRecordDisplay(scanned, *pendingRecordDisplay_)))
+                {
+                    cachedRecordDisplay_ = scanned;
+                    pendingRecordDisplay_.reset();
+                }
+                else pendingRecordDisplay_ = scanned;
+            }
+        }
+        if (!cachedRecordDisplay_)
+        {
+            CleanupRecordSurface();
+            return status;
+        }
+
+        const auto &target = *cachedRecordDisplay_;
+        if (!recordSurface_ || recordSurface_->display.layerStack != target.layerStack)
+        {
+            CleanupRecordSurface();
+            if (android::gSurfaceControl->CreateMirrorOnLayerStack(native_window, target.layerStack) != 0) return status;
+            recordSurface_.emplace();
+        }
+        else if (SameRecordDisplay(recordSurface_->display, target) && recordSurface_->source.orientation == displayInfo.orientation &&
+                 recordSurface_->source.width == displayInfo.width && recordSurface_->source.height == displayInfo.height) return status;
+
+        if (android::gSurfaceControl->ConfigureMirrorProjection(native_window, displayInfo, target) != 0)
+        {
+            CleanupRecordSurface();
+            return status;
+        }
+        recordSurface_->display = target;
+        recordSurface_->source = displayInfo;
+        LS_LOGI_TAG_FMT("RenderGL", "录屏镜像层就绪 layerStack={} orientation={} stackRect=({},{}-{},{}), displayRect=({},{}-{},{}), source={}x{}", target.layerStack, target.orientation, target.layerStackRect.left, target.layerStackRect.top, target.layerStackRect.right, target.layerStackRect.bottom, target.displayRect.left, target.displayRect.top, target.displayRect.right, target.displayRect.bottom, displayInfo.width, displayInfo.height);
+        return status;
     }
+};
 
-    inline void shutdown()
-    {
-        Touch_Shutdown();
-
-        if (opengl_backend_initialized) ImGui_ImplOpenGL3_Shutdown();
-        if (android_backend_initialized) ImGui_ImplAndroid_Shutdown();
-        if (imgui_context_created) ImGui::DestroyContext();
-        opengl_backend_initialized = false;
-        android_backend_initialized = false;
-        imgui_context_created = false;
-
-        if (display != EGL_NO_DISPLAY)
-        {
-            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-            if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
-            if (surface != EGL_NO_SURFACE) eglDestroySurface(display, surface);
-            eglTerminate(display);
-        }
-        display = EGL_NO_DISPLAY;
-        context = EGL_NO_CONTEXT;
-        surface = EGL_NO_SURFACE;
-        if (native_window)
-        {
-            android::SurfaceControlManager::Destroy(native_window);
-            ANativeWindow_release(native_window);
-            native_window = nullptr;
-        }
-    }
-} // namespace RenderGL
+inline std::unique_ptr<OpenGLRenderer> gOpenGLRenderer = nullptr;

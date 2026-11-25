@@ -54,3 +54,6 @@ Swap symbols, and build verification checks its presence in the pinned kernel.
 The zero-page fixture uses a nonzero PFN and checks missing-symbol startup.
 The 5.15 Kleaf output also needs owner write permission on generated output
 before the author's modules_prepare extraction; source content is unchanged.
+Its older Kleaf revision also omits Android/KMI markers from unstamped releases.
+The 5.15 adapter uses Kleaf's stamp configuration and the pinned branch/KMI
+inputs for external Kbuild, so version metadata comes from the kernel build.

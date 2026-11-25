@@ -49,7 +49,14 @@ SH
 chmod 755 "$WORK_ROOT/tools/kleaf-bash"
 cd "$KERNEL_DIR"
 repo manifest -r -o "$WORK_ROOT/artifacts/4k/kernel-manifest.xml"
-tools/bazel build --jobs="${JOBS:-16}" --shell_executable="$WORK_ROOT/tools/kleaf-bash" \
+bazel_args=()
+if [[ "$PROFILE" == a13-515 ]]; then
+    # Old Kleaf omits Android/KMI from unstamped releases. Build the real
+    # stamped environment and keep its branch inputs for external Kbuild.
+    bazel_args+=(--config=stamp)
+    export BRANCH="android$ANDROID-${VERSION%.*}" KMI_GENERATION="$GENERATION"
+fi
+tools/bazel build "${bazel_args[@]}" --jobs="${JOBS:-16}" --shell_executable="$WORK_ROOT/tools/kleaf-bash" \
     //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare
 if [[ "$PROFILE" == a13-515 ]]; then
     # This Kleaf revision publishes read-only generated config directories.

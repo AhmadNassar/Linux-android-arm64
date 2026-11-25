@@ -37,7 +37,7 @@ def main():
     releases = {'swap_free', 'swap_free_nr', 'free_swap_and_cache_nr', 'free_swap_and_cache'}
     config = (output / '.config').read_text()
     if tuple(map(int, version.split('.')[:2])) >= (6, 18):
-        required.update(('syscall_trace_exit', 'do_el0_softstep'))
+        required.update(('syscall_trace_exit', 'do_el0_softstep', 'zero_pfn'))
         if 'CONFIG_UPROBES=y' in config:
             required.add('uprobe_single_step_handler')
     lookups = {line.split()[-1]: line for line in (output / 'System.map').read_text().splitlines()

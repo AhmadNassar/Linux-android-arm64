@@ -51,6 +51,12 @@ cd "$KERNEL_DIR"
 repo manifest -r -o "$WORK_ROOT/artifacts/4k/kernel-manifest.xml"
 tools/bazel build --jobs="${JOBS:-16}" --shell_executable="$WORK_ROOT/tools/kleaf-bash" \
     //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare
+if [[ "$PROFILE" == a13-515 ]]; then
+    # This Kleaf revision publishes read-only generated config directories.
+    # The author's modules_prepare extraction must be able to populate them.
+    # Recursive chmod skips symlinks and only changes generated output modes.
+    chmod -R u+w "$(readlink -f "$KERNEL_DIR/bazel-bin/common/kernel_aarch64")"
+fi
 python3 - "$PREPARED_SRC/build_all.sh" "$WORK_ROOT/author-functions.sh" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()

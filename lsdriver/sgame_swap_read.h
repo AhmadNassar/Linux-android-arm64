@@ -110,6 +110,7 @@ static struct {
                                unsigned long addr, bool do_poll);
 #else
 #if SGAME_SWAP_TABLE
+    unsigned long *zero_pfn;
     struct folio *(*cache_get)(swp_entry_t entry);
 #else
     struct folio *(*cache_get)(swp_entry_t entry, struct vm_area_struct *vma, unsigned long addr);
@@ -143,6 +144,9 @@ static int sgame_swap_init(void)
     SGAME_SWAP_SYMBOL(cache_get, "swap_cache_get_folio");
 #endif
     SGAME_SWAP_SYMBOL(read_async, "read_swap_cache_async");
+#if SGAME_SWAP_TABLE
+    SGAME_SWAP_SYMBOL(zero_pfn, "zero_pfn");
+#endif
 #undef SGAME_SWAP_SYMBOL
     /* Some vendor 6.1 kernels backport the batched APIs: swap_free() and
      * free_swap_and_cache() become inline wrappers passing nr=1. Select
@@ -351,7 +355,8 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
     orig = READ_ONCE(*ptep);
     if (pte_present(orig)) {
 #if SGAME_SWAP_TABLE
-        status = pte_special(orig) && !is_zero_pfn(pte_pfn(orig)) ? -EOPNOTSUPP :
+        status = pte_special(orig) &&
+                 pte_pfn(orig) != READ_ONCE(*sgame_swap_api.zero_pfn) ? -EOPNOTSUPP :
 #else
         status = pte_devmap(orig) ? -EOPNOTSUPP :
 #endif

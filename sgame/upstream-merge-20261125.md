@@ -47,3 +47,10 @@ filter, generation and in-flight teardown handling. Older kernels retain their
 native hook registration. Production dispatch fixtures cover both uprobe
 configurations, installation rollback and reverse removal; PTE/UDF sources
 remain unchanged. Reviewed debug, uprobe and ptrace sources are hash-pinned.
+
+The linked 6.18 module exposed a non-exported `zero_pfn` reference from
+`is_zero_pfn`. The reader now resolves the variable with its other runtime
+Swap symbols, and build verification checks its presence in the pinned kernel.
+The zero-page fixture uses a nonzero PFN and checks missing-symbol startup.
+The 5.15 Kleaf output also needs owner write permission on generated output
+before the author's modules_prepare extraction; source content is unchanged.

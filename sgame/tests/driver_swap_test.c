@@ -112,7 +112,6 @@ static bool is_vm_hugetlb_page(struct vm_area_struct *vma) { (void)vma; return f
 #if SGAME_SWAP_TABLE
 #define pmd_special(v) (((v).val & 4) != 0)
 #define pte_special(v) (((v).val & 4) != 0)
-#define is_zero_pfn(v) ((v) == 0)
 #else
 #define pmd_devmap(v) (((v).val & 4) != 0)
 #define pte_devmap(v) (((v).val & 4) != 0)
@@ -201,8 +200,10 @@ enum {
     NO_FREE_AND_CACHE_NR = 4,
     NO_FREE_AND_CACHE = 8,
     NO_READ_ASYNC = 16,
+    NO_ZERO_PFN = 32,
 };
 static unsigned int unavailable_symbols;
+static unsigned long test_zero_pfn;
 static unsigned long generic_kallsyms_lookup_name(const char *name);
 
 #include "../../lsdriver/sgame_swap_read.h"
@@ -274,6 +275,10 @@ static struct page *read_async(swp_entry_t e, gfp_t g, struct vm_area_struct *v,
 #endif
 }
 static unsigned long generic_kallsyms_lookup_name(const char *name) {
+#if SGAME_SWAP_TABLE
+    if (!strcmp(name, "zero_pfn"))
+        return unavailable_symbols & NO_ZERO_PFN ? 0 : (unsigned long)&test_zero_pfn;
+#endif
 #if SGAME_SWAP_LEGACY
     if (!strcmp(name, "__lock_page_killable")) return (unsigned long)lock_page_killable;
 #endif
@@ -331,7 +336,8 @@ static void read_cases(unsigned int missing) {
     assert(linear_calls == !SGAME_READ_NC && pte_calls == SGAME_READ_NC);
     assert(!cache_calls && !backend_calls); clean();
 #if SGAME_SWAP_TABLE
-    reset(); make_resident(0, 0); test_mm.ptes[0].val |= 4;
+    reset(); test_zero_pfn = 7; make_resident(0, test_zero_pfn); test_mm.ptes[0].val |= 4;
+    memset(pages[test_zero_pfn].bytes, 0, PAGE_SIZE);
     memset(out, 9, sizeof(out));
     assert(sgame_swap_read(&test_mm, TEST_BASE, out, 8) == 8 && !out[0]); clean();
 #endif
@@ -446,7 +452,14 @@ int main(void) {
     unavailable_symbols = NO_READ_ASYNC;
     assert(sgame_swap_init() == -ENOENT);
     clean();
-    printf("driver_swap_test: API=%s cached/NC=%d: 105 reader cases + 2 initialization failures passed (balanced references, no RCU across I/O)\n",
+
+#if SGAME_SWAP_TABLE
+    memset(&sgame_swap_api, 0, sizeof(sgame_swap_api));
+    unavailable_symbols = NO_ZERO_PFN;
+    assert(sgame_swap_init() == -ENOENT);
+    clean();
+#endif
+    printf("driver_swap_test: API=%s cached/NC=%d: reader and initialization cases passed (balanced references, no RCU across I/O)\n",
            SGAME_SWAP_LEGACY ? (SGAME_SWAP_DEVICE_RCU ? "5.10-page-RCU" : "5.15-page-ref") :
            SGAME_SWAP_TABLE ? "6.18-swap-table" : SGAME_SWAP_MODERN ? "6.12-folio" :
            SGAME_SWAP_FOLIO_ENTRY ? "6.6-folio" : "6.1-folio", SGAME_READ_NC);

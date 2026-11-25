@@ -15,6 +15,7 @@
 #include <linux/spinlock.h>
 #include <linux/thread_info.h>
 #include <linux/wait.h>
+#include <linux/version.h>
 #include <asm/debug-monitors.h>
 #include <asm/ptrace.h>
 #include <asm/sysreg.h>
@@ -23,16 +24,26 @@
 #include "inline_hook_frame.h"
 #include "klog/lsdriver_log.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#include <asm/uprobes.h>
+#define SGAME_STEPBP_DIRECT 1
+static typeof(&uprobe_single_step_handler) g_stepbp_uprobe_single_step;
+#else
+#define SGAME_STEPBP_DIRECT 0
+#endif
+
 static struct break_point *g_stepbp_info;
 static DEFINE_SPINLOCK(g_stepbp_lock);
 static DEFINE_SPINLOCK(g_stepbp_hit_lock);
 static DEFINE_MUTEX(g_stepbp_mutex);
 static bool g_stepbp_stopping;
 static unsigned long g_stepbp_generation;
+#if !SGAME_STEPBP_DIRECT
 static struct list_head *g_stepbp_native_hooks;
 static void (*g_stepbp_register_hook)(struct step_hook *hook);
 static void (*g_stepbp_unregister_hook)(struct step_hook *hook);
 static bool g_stepbp_hook_registered;
+#endif
 
 struct stepbp_task_step
 {
@@ -400,6 +411,9 @@ static int __attribute__((used, __noinline__)) stepbp_finish_call_step_hook(int 
     return result;
 }
 
+#if SGAME_STEPBP_DIRECT
+typedef unsigned long stepbp_esr_t;
+#else
 static struct step_hook g_stepbp_user_hook;
 
 /* Older GKI kernels use a 32-bit ESR callback. Derive the exact native type so
@@ -407,6 +421,7 @@ static struct step_hook g_stepbp_user_hook;
 typedef typeof(__builtin_choose_expr(
     __builtin_types_compatible_p(typeof(((struct step_hook *)0)->fn), int (*)(struct pt_regs *, unsigned int)),
     (unsigned int)0, (unsigned long)0)) stepbp_esr_t;
+#endif
 
 /* The compiler can inline call_step_hook into single_step_handler. Register a
  * native hook so both the inlined and out-of-line dispatch paths reach us.
@@ -418,7 +433,9 @@ static int stepbp_user_single_step(struct pt_regs *regs, stepbp_esr_t esr)
     bool target_task;
     struct stepbp_return_frame frame;
     struct break_point *info;
+#if !SGAME_STEPBP_DIRECT
     struct step_hook *hook = &g_stepbp_user_hook;
+#endif
     int native_result = DBG_HOOK_ERROR;
 
     if (!regs || !user_mode(regs)) return DBG_HOOK_ERROR;
@@ -437,16 +454,35 @@ static int stepbp_user_single_step(struct pt_regs *regs, stepbp_esr_t esr)
     spin_unlock_irqrestore(&g_stepbp_lock, flags);
     if (!target_task) return DBG_HOOK_ERROR;
 
+#if SGAME_STEPBP_DIRECT
+    if (g_stepbp_uprobe_single_step) native_result = g_stepbp_uprobe_single_step(regs, esr);
+#else
     list_for_each_entry_continue_rcu(hook, g_stepbp_native_hooks, node)
     {
         native_result = hook->fn(regs, esr);
         if (native_result == DBG_HOOK_HANDLED) break;
     }
+#endif
     return stepbp_finish_call_step_hook(native_result, &frame, esr);
 }
 
+#if SGAME_STEPBP_DIRECT
+/* 6.18 dispatches EL0 steps directly instead of registering step_hook objects.
+ * Untargeted traps replay the kernel handler unchanged. Targeted traps retain
+ * native uprobe precedence and the shared scope/replay/lifecycle handling. */
+static int work_trampoline_stepbp_el0_softstep(struct pt_regs *hook_regs)
+{
+    if (!hook_regs) return 0;
+    return stepbp_user_single_step((struct pt_regs *)hook_regs->regs[1],
+                                  hook_regs->regs[0]) == DBG_HOOK_HANDLED;
+}
+#endif
+
 static struct hook_entry g_stepbp_required_hooks[] = {
     HOOK_ENTRY("syscall_trace_exit", work_trampoline_stepbp_syscall_trace_exit),
+#if SGAME_STEPBP_DIRECT
+    HOOK_ENTRY("do_el0_softstep", work_trampoline_stepbp_el0_softstep),
+#endif
 };
 
 static struct hook_entry g_stepbp_switch_hook[] = {
@@ -457,10 +493,18 @@ static int stepbp_install_required_hooks(void)
 {
     int count = sizeof(g_stepbp_required_hooks) / sizeof(g_stepbp_required_hooks[0]);
 
+#if SGAME_STEPBP_DIRECT
+    if (IS_ENABLED(CONFIG_UPROBES) && !g_stepbp_uprobe_single_step)
+    {
+        g_stepbp_uprobe_single_step = (void *)generic_kallsyms_lookup_name("uprobe_single_step_handler");
+        if (!g_stepbp_uprobe_single_step) return -ENOENT;
+    }
+#else
     if (!g_stepbp_register_hook) g_stepbp_register_hook = (void *)generic_kallsyms_lookup_name("register_user_step_hook");
     if (!g_stepbp_unregister_hook) g_stepbp_unregister_hook = (void *)generic_kallsyms_lookup_name("unregister_user_step_hook");
     if (!g_stepbp_native_hooks) g_stepbp_native_hooks = (void *)generic_kallsyms_lookup_name("user_step_hook");
     if (!g_stepbp_register_hook || !g_stepbp_unregister_hook || !g_stepbp_native_hooks) return -ENOENT;
+#endif
 
     for (int i = 0; i < count; i++)
     {
@@ -473,23 +517,27 @@ static int stepbp_install_required_hooks(void)
         }
     }
 
+#if !SGAME_STEPBP_DIRECT
     if (!g_stepbp_hook_registered)
     {
         g_stepbp_user_hook.fn = stepbp_user_single_step;
         g_stepbp_register_hook(&g_stepbp_user_hook);
         g_stepbp_hook_registered = true;
     }
+#endif
 
     return 0;
 }
 
 static void stepbp_remove_required_hooks(void)
 {
+#if !SGAME_STEPBP_DIRECT
     if (g_stepbp_hook_registered)
     {
         g_stepbp_unregister_hook(&g_stepbp_user_hook);
         g_stepbp_hook_registered = false;
     }
+#endif
     for (int i = (int)(sizeof(g_stepbp_required_hooks) / sizeof(g_stepbp_required_hooks[0])) - 1; i >= 0; i--) hook_entry_remove(&g_stepbp_required_hooks[i]);
 }
 

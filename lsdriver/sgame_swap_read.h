@@ -94,6 +94,8 @@
 #define SGAME_SWAP_ATTEMPTS 3
 MODULE_INFO(sgame_swap, SGAME_SWAP_VERSION);
 
+struct swap_iocb;
+
 static struct {
     struct swap_info_struct *(*get_device)(swp_entry_t entry);
     int (*duplicate)(swp_entry_t entry);
@@ -325,7 +327,12 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
     if (pmd_leaf(pmdval)) {
         ptl = pmd_lock(mm, pmd);
         pmdval = READ_ONCE(*pmd);
-        if (pmd_leaf(pmdval) && !pmd_devmap(pmdval)) {
+        if (pmd_leaf(pmdval) &&
+#if SGAME_SWAP_TABLE
+            !pmd_special(pmdval)) {
+#else
+            !pmd_devmap(pmdval)) {
+#endif
             unsigned long pfn = pmd_pfn(pmdval) + ((addr & ~PMD_MASK) >> PAGE_SHIFT);
             status = sgame_swap_copy_resident(pfn, addr, buffer, size);
             spin_unlock(ptl);
@@ -343,7 +350,11 @@ static int sgame_swap_read_page(struct mm_struct *mm, struct vm_area_struct *vma
     if (!ptep) return -EAGAIN;
     orig = READ_ONCE(*ptep);
     if (pte_present(orig)) {
+#if SGAME_SWAP_TABLE
+        status = pte_special(orig) && !is_zero_pfn(pte_pfn(orig)) ? -EOPNOTSUPP :
+#else
         status = pte_devmap(orig) ? -EOPNOTSUPP :
+#endif
                  sgame_swap_copy_resident(pte_pfn(orig), addr, buffer, size);
         sgame_swap_pte_unlock(ptep, ptl);
         if (!status) ++sgame_swap_stats.resident;

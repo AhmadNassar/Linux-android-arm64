@@ -9,8 +9,9 @@ Upstream rewrote its dump archive history. Source integration uses the recorded
 previous upstream as the effective three-way baseline and records both real
 parents in the merge commit. Project history is retained without rebasing.
 
-The PTE/UDF implementation, single-step implementation, breakpoint dispatcher
-and PTE compatibility header are unchanged from the project baseline. This
+At the merge commit, the PTE/UDF implementation, single-step implementation,
+breakpoint dispatcher and PTE compatibility header are unchanged from the
+project baseline. This
 retains the preparation/publication ordering in ff7ec74 and the fault handling,
 mmap trylock and stale-session rollback changes in 9b2aaa8. The native PTE
 dependencies restored in 7c580f3 also remain present. Earlier DPT thread scopes,
@@ -37,3 +38,12 @@ now resolves the PID under RCU and acquires its own task reference before leavin
 the read-side section. Existing session fixtures exercise missing, live and dead
 targets and confirm references are balanced. No breakpoint source changes are
 needed for this build fix.
+
+The 6.18 build also requires replacing removed devmap predicates with its
+special-PFN predicates, retaining readable zero pages. Its ARM64 debug path no
+longer has native step_hook registration. A 6.18-only do_el0_softstep adapter
+keeps native uprobe precedence and reuses the existing thread scope, replay
+filter, generation and in-flight teardown handling. Older kernels retain their
+native hook registration. Production dispatch fixtures cover both uprobe
+configurations, installation rollback and reverse removal; PTE/UDF sources
+remain unchanged. Reviewed debug, uprobe and ptrace sources are hash-pinned.

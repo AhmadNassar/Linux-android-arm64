@@ -16,7 +16,8 @@
   "modified_upstream_files": {
     "lsdriver/arm64_ptedbg-20260822-000439.h": "Prepare/publish before arming; serialize exception shadow reads with teardown; use mmap trylock and session generation for exception rollback",
     "lsdriver/lsdriver.c": "Retain project Swap/simulation dispatch, serialized reference ownership and deferred exit cleanup; integrate upstream client diagnostics and signal tracing while preserving existing exception hooks.",
-    "lsdriver/arm64_dptdbg.h": "Retain project page-table allocation provenance and 5.10 compatibility with upstream locking and CFI fixes."
+    "lsdriver/arm64_dptdbg.h": "Retain project page-table allocation provenance and 5.10 compatibility with upstream locking and CFI fixes.",
+    "lsdriver/arm64_stepdbg.h": "Retain native step hooks on 5.10 through 6.12; adapt 6.18 direct EL0 step dispatch while preserving native uprobe precedence, thread scopes, replay filtering and teardown."
   },
   "previous_upstream_commit": "df4ef96c90365c0ba7e638a8b7fadbe245c701f4",
   "cpu_render": "disabled-upstream"

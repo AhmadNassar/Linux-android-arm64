@@ -205,7 +205,13 @@
       "include/linux/mm.h": "0ebea971b694f8f26a402be139362e352a23ff059b350976d37ac08f1282d960",
       "include/linux/mm_types.h": "d024ffd37a47ab5f49a3057d4b72f17048812a906179a998488a14506afa167c",
       "include/trace/events/signal.h": "0b6fe2f241b547b4fec247e2659501366dab5039b98a066558287bedaf084774",
-      "arch/arm64/include/asm/pgtable.h": "17f2a68ce5afe0391c4c53eb0c3bac568020af945ec7b2b1dcd19ee85471487c"
+      "arch/arm64/include/asm/pgtable.h": "17f2a68ce5afe0391c4c53eb0c3bac568020af945ec7b2b1dcd19ee85471487c",
+      "include/linux/pgtable.h": "3ed7de8f22ac53e76025bc96ea5b3340881d0fc09b11c690625b32137a3fb6ef",
+      "arch/arm64/include/asm/debug-monitors.h": "10638ab4564cf07d218cbbd4f4fb628f082c05f9e2b251cf042a5a1716aa8a1f",
+      "arch/arm64/kernel/debug-monitors.c": "31c54830d52fb73d697ec851907835dfdbc5e0b2aa167744b7afb67d97894ad9",
+      "arch/arm64/include/asm/uprobes.h": "6ca17978425132d4840d955755ab2071644ffa3f9ea3461e738b20dca18de5f4",
+      "arch/arm64/kernel/probes/uprobes.c": "771af2477d74f6d7450925267050e96dcec9747d1135149729bea4114b52c80c",
+      "arch/arm64/kernel/ptrace.c": "1f509d43a77ae7a67248de273ec0108d671bb2ff1b2f2c88c6440f61baa5726a"
     }
   }
 }

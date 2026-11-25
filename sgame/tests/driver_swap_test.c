@@ -109,11 +109,17 @@ static bool is_vm_hugetlb_page(struct vm_area_struct *vma) { (void)vma; return f
 #define pmd_none(v) pgd_none(v)
 #define pmd_present(v) (((v).val & 1) != 0)
 #define pmd_leaf(v) (((v).val & 2) != 0)
+#if SGAME_SWAP_TABLE
+#define pmd_special(v) (((v).val & 4) != 0)
+#define pte_special(v) (((v).val & 4) != 0)
+#define is_zero_pfn(v) ((v) == 0)
+#else
 #define pmd_devmap(v) (((v).val & 4) != 0)
+#define pte_devmap(v) (((v).val & 4) != 0)
+#endif
 #define pmd_bad(v) (!(v).val)
 #define pmd_pfn(v) ((v).val >> PAGE_SHIFT)
 #define pte_present(v) (((v).val & 1) != 0)
-#define pte_devmap(v) (((v).val & 4) != 0)
 #define pte_pfn(v) ((v).val >> PAGE_SHIFT)
 #define is_swap_pte(v) ((v).val && !pte_present(v))
 #define pte_to_swp_entry(v) ((swp_entry_t){ (v).val >> PAGE_SHIFT })
@@ -324,6 +330,11 @@ static void read_cases(unsigned int missing) {
     assert(sgame_swap_read(&test_mm, TEST_BASE, out, 8) == 8 && out[0] == 2);
     assert(linear_calls == !SGAME_READ_NC && pte_calls == SGAME_READ_NC);
     assert(!cache_calls && !backend_calls); clean();
+#if SGAME_SWAP_TABLE
+    reset(); make_resident(0, 0); test_mm.ptes[0].val |= 4;
+    memset(out, 9, sizeof(out));
+    assert(sgame_swap_read(&test_mm, TEST_BASE, out, 8) == 8 && !out[0]); clean();
+#endif
     reset(); make_swap(0, 3);
     assert(sgame_swap_read(&test_mm, TEST_BASE, out, 8) == 8 && out[0] == 3);
     assert(cache_calls == 1 && !backend_calls); clean();

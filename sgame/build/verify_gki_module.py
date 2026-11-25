@@ -35,11 +35,15 @@ def main():
         if '__cfi_check' not in symbols:
             raise SystemExit('Legacy module CFI entry is missing')
     releases = {'swap_free', 'swap_free_nr', 'free_swap_and_cache_nr', 'free_swap_and_cache'}
+    config = (output / '.config').read_text()
+    if tuple(map(int, version.split('.')[:2])) >= (6, 18):
+        required.update(('syscall_trace_exit', 'do_el0_softstep'))
+        if 'CONFIG_UPROBES=y' in config:
+            required.add('uprobe_single_step_handler')
     lookups = {line.split()[-1]: line for line in (output / 'System.map').read_text().splitlines()
                if line.split() and line.split()[-1] in required | releases}
     if required - lookups.keys() or not releases & lookups.keys():
         raise SystemExit('Kernel lacks required Swap/environment runtime symbols')
-    config = (output / '.config').read_text()
     expected_page = 'CONFIG_ARM64_16K_PAGES=y' if page_size == '16k' else 'CONFIG_ARM64_4K_PAGES=y'
     if expected_page not in config or 'CONFIG_SWAP=y' not in config:
         raise SystemExit('Wrong page size or missing CONFIG_SWAP')
